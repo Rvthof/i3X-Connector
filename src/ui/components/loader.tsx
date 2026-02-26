@@ -6,7 +6,7 @@ import { LoaderProps } from '../types';
 const Loader: React.FC<LoaderProps> = ({ context, setApiData, setApiUrl }) => {
     const studioPro = getStudioProApi(context);
     const messageApi = studioPro.ui.messageBoxes;
-    const [url, setUrl] = useState('http://35.162.185.159:8885/i3x/objecttypes');
+    const [url, setUrl] = useState('https://i3x.cesmii.net/objecttypes');
     const [loading, setLoading] = useState(false);
 
     const isValidUrl = (urlString: string): boolean => {
@@ -47,7 +47,7 @@ const Loader: React.FC<LoaderProps> = ({ context, setApiData, setApiUrl }) => {
                 className={styles.loaderInput}
                 type="text"
                 value={url}
-                placeholder="Enter URL, e.g. http://35.162.185.159:8885/i3x/objecttypes"
+                placeholder="Enter URL, e.g. https://i3x.cesmii.net/objecttypes"
                 onChange={(e) => setUrl(e.target.value)}
                 onKeyDown={handleKeyDown}
                 disabled={loading}

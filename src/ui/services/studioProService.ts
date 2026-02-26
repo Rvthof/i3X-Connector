@@ -20,7 +20,7 @@ export interface ImplementEntityResult {
 
 export async function implementObjectAsEntity(
     objectName: string,
-    moduleName = 'i3X-Connector'
+    moduleName = 'i3X_Connector'
 ): Promise<ImplementEntityResult> {
     const sp = getStudioPro();
     const entityName = objectName.trim();

@@ -39,19 +39,19 @@ export const component: IComponent = {
 
             const handleImplement = async (item: ObjectType) => {
                 try {
-                    const result = await implementObjectAsEntity(item.displayName, "i3X-Connector");
+                    const result = await implementObjectAsEntity(item.displayName, "i3X_Connector");
 
                     if (result.created) {
                         await studioPro.ui.notifications.show({
                             title: "Entity created",
-                            message: `Created entity '${result.entityName}' in module 'i3X-Connector'.`,
+                            message: `Created entity '${result.entityName}' in module 'i3X_Connector'.`,
                             displayDurationInSeconds: 5,
                         });
                     } else {
                         await studioPro.ui.messageBoxes.show(
                             "info",
                             "Entity already exists",
-                            `The entity '${result.entityName}' already exists in module 'i3X-Connector'.`
+                            `The entity '${result.entityName}' already exists in module 'i3X_Connector'.`
                         );
                     }
                 } catch (error) {
