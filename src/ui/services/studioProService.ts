@@ -1,6 +1,7 @@
 import type { StudioProApi } from '@mendix/extensions-api';
 import type { DomainModels } from '@mendix/extensions-api';
 import type { Microflows } from '@mendix/extensions-api';
+import type { Texts } from '@mendix/extensions-api';
 import { isGroupProperty, isArrayProperty, extractArrayItemProperties, type LeafProperty, type ObjectType } from '../types';
 
 let studioPro: StudioProApi | null = null;
@@ -129,14 +130,62 @@ function getObjectsUrl(objectTypesUrl: string, typeId: string): string | null {
 async function createSequenceFlow(
     sp: StudioProApi,
     startId: string,
-    endId: string
+    endId: string,
+    exclSplitValue?: boolean
 ): Promise<Microflows.SequenceFlow> {
     const sequenceFlow = (await sp.app.model.microflows.createElement(
         'Microflows$SequenceFlow'
     )) as Microflows.SequenceFlow;
     sequenceFlow.origin = startId;
     sequenceFlow.destination = endId;
+    if (exclSplitValue !== undefined) {
+        const caseValue = (await sp.app.model.microflows.createElement(
+            'Microflows$EnumerationCase'
+        )) as Microflows.EnumerationCase;
+        caseValue.value = exclSplitValue ? 'true' : 'false';
+        sequenceFlow.caseValues = [caseValue];
+    }
     return sequenceFlow;
+}
+
+async function createMessageActivity(
+    sp: StudioProApi,
+    type: Microflows.ShowMessageType,
+    messageText: string,
+    expressionArgs: string[],
+    languageCode: string
+): Promise<Microflows.ActionActivity> {
+    const messageActivity = (await sp.app.model.microflows.createElement(
+        'Microflows$ActionActivity'
+    )) as Microflows.ActionActivity;
+    const showMessage = (await sp.app.model.microflows.createElement(
+        'Microflows$ShowMessageAction'
+    )) as Microflows.ShowMessageAction;
+    const textTemplate = (await sp.app.model.microflows.createElement(
+        'Microflows$TextTemplate'
+    )) as Microflows.TextTemplate;
+    const text = (await sp.app.model.microflows.createElement('Texts$Text')) as Texts.Text;
+    const translation = (await sp.app.model.microflows.createElement(
+        'Texts$Translation'
+    )) as Texts.Translation;
+
+    for (const arg of expressionArgs) {
+        const templateArg = (await sp.app.model.microflows.createElement(
+            'Microflows$TemplateArgument'
+        )) as Microflows.TemplateArgument;
+        templateArg.expression = arg;
+        textTemplate.arguments.push(templateArg);
+    }
+
+    translation.languageCode = languageCode;
+    translation.text = messageText;
+    text.translations.push(translation);
+
+    textTemplate.text = text;
+    showMessage.type = type;
+    showMessage.template = textTemplate;
+    messageActivity.action = showMessage;
+    return messageActivity;
 }
 
 async function ensureMicroflowForObject(
@@ -202,8 +251,20 @@ async function ensureMicroflowForObject(
 
     actionActivity.action = restCall;
     actionActivity.size = { width: 120, height: 60 };
-    actionActivity.relativeMiddlePoint = { x: 420, y: 200 };
+    actionActivity.relativeMiddlePoint = { x: 400, y: 200 };
     microflow.objectCollection.objects.push(actionActivity);
+
+    const exclusiveSplit = (await sp.app.model.microflows.createElement(
+        'Microflows$ExclusiveSplit'
+    )) as Microflows.ExclusiveSplit;
+    const splitCondition = (await sp.app.model.microflows.createElement(
+        'Microflows$ExpressionSplitCondition'
+    )) as Microflows.ExpressionSplitCondition;
+    splitCondition.expression = '$latestHttpResponse/StatusCode = 200';
+    exclusiveSplit.splitCondition = splitCondition;
+    exclusiveSplit.size = { width: 60, height: 60 };
+    exclusiveSplit.relativeMiddlePoint = { x: 600, y: 200 };
+    microflow.objectCollection.objects.push(exclusiveSplit);
 
     if (microflow.flows.length > 0) {
         microflow.flows.pop();
@@ -211,10 +272,41 @@ async function ensureMicroflowForObject(
 
     const startEvent = microflow.objectCollection.objects[0];
     const endEvent = microflow.objectCollection.objects[1];
-    endEvent.relativeMiddlePoint = { x: 620, y: 200 };
-
+    endEvent.relativeMiddlePoint = { x: 900, y: 200 };
     microflow.flows.push(await createSequenceFlow(sp, startEvent.$ID, actionActivity.$ID));
-    microflow.flows.push(await createSequenceFlow(sp, actionActivity.$ID, endEvent.$ID));
+    microflow.flows.push(await createSequenceFlow(sp, actionActivity.$ID, exclusiveSplit.$ID));
+
+    const successActivity = await createMessageActivity(
+        sp,
+        'Information',
+        'Successfully received response from i3X API. Response: {1}',
+        ['$ResponseBody'],
+        'en_US'
+    );
+    successActivity.size = { width: 120, height: 60 };
+    successActivity.relativeMiddlePoint = { x: 800, y: 200 };
+    microflow.objectCollection.objects.push(successActivity);
+    microflow.flows.push(await createSequenceFlow(sp, exclusiveSplit.$ID, successActivity.$ID, true));
+    microflow.flows.push(await createSequenceFlow(sp, successActivity.$ID, endEvent.$ID));
+
+    const errorActivity = await createMessageActivity(
+        sp,
+        'Error',
+        'Error: Received status code {1} from i3X API.',
+        ['toString($latestHttpResponse/StatusCode)'],
+        'en_US'
+    );
+    errorActivity.size = { width: 120, height: 60 };
+    errorActivity.relativeMiddlePoint = { x: 800, y: 300 };
+    microflow.objectCollection.objects.push(errorActivity);
+    microflow.flows.push(await createSequenceFlow(sp, exclusiveSplit.$ID, errorActivity.$ID, false));
+
+    const errorEndEvent = (await sp.app.model.microflows.createElement(
+        'Microflows$EndEvent'
+    )) as Microflows.EndEvent;
+    errorEndEvent.relativeMiddlePoint = { x: 900, y: 300 };
+    microflow.objectCollection.objects.push(errorEndEvent);
+    microflow.flows.push(await createSequenceFlow(sp, errorActivity.$ID, errorEndEvent.$ID));
 
     await sp.app.model.microflows.save(microflow);
     return true;
