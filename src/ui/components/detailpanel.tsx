@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import styles from '../index.module.css';
-import { ObjectType, AnyProperty, isGroupProperty } from '../types';
+import { ObjectType, AnyProperty, isGroupProperty, isArrayProperty, extractArrayItemProperties } from '../types';
 
 interface Props {
     item: ObjectType;
@@ -16,7 +16,6 @@ const INT_MAX   = 9223372036854775807;
 function formatConstraint(key: string, value: unknown): string | null {
     if (typeof value !== 'number' && typeof value !== 'string' && typeof value !== 'boolean') return null;
     if (typeof value === 'number') {
-        // Suppress double/long min/max sentinels — they just mean "unbounded"
         if (Math.abs(value) >= FLOAT_MAX * 0.999 || Math.abs(value) >= INT_MAX * 0.999) return null;
     }
     const labels: Record<string, string> = {
@@ -51,9 +50,10 @@ const TypeBadge: React.FC<{ prop: AnyProperty }> = ({ prop }) => {
 
 // ─── Leaf property row ────────────────────────────────────────────────────────
 
-const LeafRow: React.FC<{ name: string; prop: AnyProperty; required: boolean }> = ({ name, prop, required }) => (
+const LeafRow: React.FC<{ name: string; prop: AnyProperty; required: boolean; indent?: boolean }> = ({ name, prop, required, indent }) => (
     <tr className={styles.propRow}>
         <td className={styles.propNameCell}>
+            {indent && <span className={styles.indent} />}
             <span className={styles.propName}>{name}</span>
         </td>
         <td className={styles.tableCell}>
@@ -70,14 +70,56 @@ const LeafRow: React.FC<{ name: string; prop: AnyProperty; required: boolean }> 
     </tr>
 );
 
+// ─── Array section (collapsible) ─────────────────────────────────────────────
+
+const ArraySection: React.FC<{ name: string; prop: AnyProperty; isRequired: boolean }> = ({ name, prop, isRequired }) => {
+    const [open, setOpen] = useState(true);
+
+    if (!isArrayProperty(prop)) return null;
+    const itemProps = extractArrayItemProperties(prop);
+
+    return (
+        <>
+            <tr
+                className={`${styles.propRow} ${styles.groupRow}`}
+                onClick={() => setOpen(o => !o)}
+            >
+                <td className={styles.propNameCell} colSpan={4}>
+                    <span className={styles.groupChevron}>{open ? '▾' : '▸'}</span>
+                    <span className={styles.groupName}>{name}</span>
+                    <span className={styles.arrayBadge} style={{ marginLeft: 6 }}>array</span>
+                    {itemProps
+                        ? <span className={styles.groupCount}>{Object.keys(itemProps).length} fields → entity</span>
+                        : <span className={styles.groupCount}>no resolvable item schema</span>}
+                    {isRequired && <span className={`${styles.requiredBadge} ${styles.groupRequiredBadge}`}>required</span>}
+                </td>
+            </tr>
+            {open && itemProps && Object.entries(itemProps).map(([leafName, leafProp]) => (
+                <tr key={leafName} className={`${styles.propRow} ${styles.propRowNested}`}>
+                    <td className={styles.propNameCell}>
+                        <span className={styles.indent} />
+                        <span className={styles.propName}>{leafName}</span>
+                    </td>
+                    <td className={styles.tableCell}><TypeBadge prop={leafProp} /></td>
+                    <td className={styles.tableCell}><span className={styles.textFaint}>optional</span></td>
+                    <td className={styles.tableCell}><ConstraintPills prop={leafProp} /></td>
+                </tr>
+            ))}
+        </>
+    );
+};
+
 // ─── Group section (collapsible) ──────────────────────────────────────────────
 
 const GroupSection: React.FC<{ name: string; prop: AnyProperty; topRequired: string[] }> = ({ name, prop, topRequired }) => {
     const [open, setOpen] = useState(true);
     const isRequired = topRequired.includes(name);
 
+    if (isArrayProperty(prop)) {
+        return <ArraySection name={name} prop={prop} isRequired={isRequired} />;
+    }
+
     if (!isGroupProperty(prop)) {
-        // Flat leaf at top level (e.g. IMachineryItemVendorNameplateType)
         return <LeafRow name={name} prop={prop} required={isRequired} />;
     }
 
@@ -86,7 +128,6 @@ const GroupSection: React.FC<{ name: string; prop: AnyProperty; topRequired: str
 
     return (
         <>
-            {/* Group header row */}
             <tr
                 className={`${styles.propRow} ${styles.groupRow}`}
                 onClick={() => setOpen(o => !o)}
@@ -98,25 +139,19 @@ const GroupSection: React.FC<{ name: string; prop: AnyProperty; topRequired: str
                     {isRequired && <span className={`${styles.requiredBadge} ${styles.groupRequiredBadge}`}>required</span>}
                 </td>
             </tr>
-
-            {/* Leaf rows */}
             {open && leafEntries.map(([leafName, leafProp]) => (
                 <tr key={leafName} className={`${styles.propRow} ${styles.propRowNested}`}>
                     <td className={styles.propNameCell}>
                         <span className={styles.indent} />
                         <span className={styles.propName}>{leafName}</span>
                     </td>
-                    <td className={styles.tableCell}>
-                        <TypeBadge prop={leafProp} />
-                    </td>
+                    <td className={styles.tableCell}><TypeBadge prop={leafProp} /></td>
                     <td className={styles.tableCell}>
                         {groupRequired.includes(leafName)
                             ? <span className={styles.requiredBadge}>required</span>
                             : <span className={styles.textFaint}>optional</span>}
                     </td>
-                    <td className={styles.tableCell}>
-                        <ConstraintPills prop={leafProp} />
-                    </td>
+                    <td className={styles.tableCell}><ConstraintPills prop={leafProp} /></td>
                 </tr>
             ))}
         </>
@@ -134,6 +169,10 @@ const DetailPanel: React.FC<Props> = ({ item, onClose, onImplement }) => {
 
     const totalLeafs = entries.reduce((acc, [, prop]) => {
         if (isGroupProperty(prop)) return acc + Object.keys(prop.properties ?? {}).length;
+        if (isArrayProperty(prop)) {
+            const itemProps = extractArrayItemProperties(prop);
+            return acc + (itemProps ? Object.keys(itemProps).length : 0);
+        }
         return acc + 1;
     }, 0);
 

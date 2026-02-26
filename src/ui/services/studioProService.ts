@@ -1,4 +1,7 @@
 import type { StudioProApi } from '@mendix/extensions-api';
+import type { DomainModels } from '@mendix/extensions-api';
+import type { Microflows } from '@mendix/extensions-api';
+import { isGroupProperty, isArrayProperty, extractArrayItemProperties, type LeafProperty, type ObjectType } from '../types';
 
 let studioPro: StudioProApi | null = null;
 
@@ -14,18 +17,218 @@ export function getStudioPro(): StudioProApi {
 }
 
 export interface ImplementEntityResult {
-    entityName: string;
-    created: boolean;
+    baseEntityName: string;
+    baseEntityCreated: boolean;
+    groupEntitiesCreated: number;
+    attributesCreated: number;
+    associationsCreated: number;
+    jsonStructureName: string;
+    jsonStructureCreated: boolean;
+    microflowName: string;
+    microflowCreated: boolean;
+}
+
+type MendixAttributeType = NonNullable<DomainModels.AttributeCreationOptions['type']>;
+const MENDIX_LONG_MIN = Number('-9223372036854775808');
+const MENDIX_LONG_MAX = Number('9223372036854775807');
+
+function toModelName(raw: string): string {
+    const compact = raw.trim().replace(/[^A-Za-z0-9_]/g, '_').replace(/_+/g, '_');
+    const startsWithLetter = /^[A-Za-z]/.test(compact) ? compact : `N_${compact}`;
+    return startsWithLetter || 'Unnamed';
+}
+
+function getAttributeType(property: LeafProperty): MendixAttributeType | undefined {
+    if (property.type === 'string') {
+        if (property.format === 'date-time' || property.format === 'date') {
+            return 'DateTime';
+        }
+        return 'String';
+    }
+
+    if (property.type === 'boolean') {
+        return 'Boolean';
+    }
+
+    if (property.type === 'integer') {
+        if (property.format === 'int64' || property.format === 'long') {
+            return 'Long';
+        }
+        return 'Integer';
+    }
+
+    if (property.type === 'number') {
+        return 'Decimal';
+    }
+
+    return undefined;
+}
+
+function clampToMendixLong(value: number): number {
+    if (!Number.isFinite(value)) {
+        return value;
+    }
+    if (value < MENDIX_LONG_MIN) {
+        return MENDIX_LONG_MIN;
+    }
+    if (value > MENDIX_LONG_MAX) {
+        return MENDIX_LONG_MAX;
+    }
+    return value;
+}
+
+function sanitizeJsonForMendixLimits(value: unknown, parentKey?: string): unknown {
+    if (Array.isArray(value)) {
+        return value.map(item => sanitizeJsonForMendixLimits(item));
+    }
+
+    if (value !== null && typeof value === 'object') {
+        const sanitized: Record<string, unknown> = {};
+        for (const [key, childValue] of Object.entries(value)) {
+            sanitized[key] = sanitizeJsonForMendixLimits(childValue, key);
+        }
+        return sanitized;
+    }
+
+    if (typeof value === 'number' && (parentKey === 'minimum' || parentKey === 'maximum')) {
+        return clampToMendixLong(value);
+    }
+
+    return value;
+}
+
+function getOrCreateEntityName(
+    domainModel: DomainModels.DomainModel,
+    preferredName: string
+): { name: string; created: boolean } {
+    const normalized = toModelName(preferredName);
+    const existing = domainModel.getEntity(normalized);
+    if (existing) {
+        return { name: normalized, created: false };
+    }
+    return { name: normalized, created: true };
+}
+
+function getObjectsUrl(objectTypesUrl: string, typeId: string): string | null {
+    try {
+        const u = new URL(objectTypesUrl);
+        const trimmedPath = u.pathname.replace(/\/+$/, '');
+        if (/\/objecttypes$/i.test(trimmedPath)) {
+            u.pathname = trimmedPath.replace(/\/objecttypes$/i, '/objects');
+        } else {
+            u.pathname = `${trimmedPath}/objects`.replace(/\/{2,}/g, '/');
+        }
+        u.search = '';
+        u.searchParams.set('typeId', typeId);
+        return u.toString();
+    } catch {
+        return null;
+    }
+}
+
+async function createSequenceFlow(
+    sp: StudioProApi,
+    startId: string,
+    endId: string
+): Promise<Microflows.SequenceFlow> {
+    const sequenceFlow = (await sp.app.model.microflows.createElement(
+        'Microflows$SequenceFlow'
+    )) as Microflows.SequenceFlow;
+    sequenceFlow.origin = startId;
+    sequenceFlow.destination = endId;
+    return sequenceFlow;
+}
+
+async function ensureMicroflowForObject(
+    sp: StudioProApi,
+    moduleId: string,
+    moduleName: string,
+    microflowName: string,
+    objectsUrl: string
+): Promise<boolean> {
+    const existingMicroflows = await sp.app.model.microflows.loadAll(
+        unitInfo => unitInfo.moduleName === moduleName && unitInfo.name === microflowName,
+        1
+    );
+    if (existingMicroflows.length > 0) {
+        return false;
+    }
+
+    const microflow = await sp.app.model.microflows.addMicroflow(moduleId, { name: microflowName });
+    const actionActivity = (await sp.app.model.microflows.createElement(
+        'Microflows$ActionActivity'
+    )) as Microflows.ActionActivity;
+    const restCall = (await sp.app.model.microflows.createElement(
+        'Microflows$RestCallAction'
+    )) as Microflows.RestCallAction;
+    const httpConfiguration = (await sp.app.model.microflows.createElement(
+        'Microflows$HttpConfiguration'
+    )) as Microflows.HttpConfiguration;
+    const requestHandler = (await sp.app.model.microflows.createElement(
+        'Microflows$CustomRequestHandling'
+    )) as Microflows.CustomRequestHandling;
+    const requestTemplate = (await sp.app.model.microflows.createElement(
+        'Microflows$StringTemplate'
+    )) as Microflows.StringTemplate;
+    const locationTemplate = (await sp.app.model.microflows.createElement(
+        'Microflows$StringTemplate'
+    )) as Microflows.StringTemplate;
+    const locationTemplateArg = (await sp.app.model.microflows.createElement(
+        'Microflows$TemplateArgument'
+    )) as Microflows.TemplateArgument;
+    const resultHandling = (await sp.app.model.microflows.createElement(
+        'Microflows$ResultHandling'
+    )) as Microflows.ResultHandling;
+    const stringType = await sp.app.model.microflows.createElement('DataTypes$StringType');
+
+    requestTemplate.text = '';
+    requestHandler.template = requestTemplate;
+    restCall.requestHandling = requestHandler;
+    restCall.requestHandlingType = 'Custom';
+
+    httpConfiguration.overrideLocation = true;
+    locationTemplate.text = '{1}';
+    locationTemplateArg.expression = `'${objectsUrl}'`;
+    locationTemplate.arguments = [locationTemplateArg];
+    httpConfiguration.customLocationTemplate = locationTemplate;
+    restCall.httpConfiguration = httpConfiguration;
+
+    resultHandling.storeInVariable = true;
+    resultHandling.outputVariableName = 'ResponseBody';
+    resultHandling.variableType = stringType as typeof resultHandling.variableType;
+    restCall.resultHandling = resultHandling;
+    restCall.resultHandlingType = 'String';
+    restCall.errorResultHandlingType = 'None';
+
+    actionActivity.action = restCall;
+    actionActivity.size = { width: 120, height: 60 };
+    actionActivity.relativeMiddlePoint = { x: 420, y: 200 };
+    microflow.objectCollection.objects.push(actionActivity);
+
+    if (microflow.flows.length > 0) {
+        microflow.flows.pop();
+    }
+
+    const startEvent = microflow.objectCollection.objects[0];
+    const endEvent = microflow.objectCollection.objects[1];
+    endEvent.relativeMiddlePoint = { x: 620, y: 200 };
+
+    microflow.flows.push(await createSequenceFlow(sp, startEvent.$ID, actionActivity.$ID));
+    microflow.flows.push(await createSequenceFlow(sp, actionActivity.$ID, endEvent.$ID));
+
+    await sp.app.model.microflows.save(microflow);
+    return true;
 }
 
 export async function implementObjectAsEntity(
-    objectName: string,
+    selectedObject: ObjectType,
+    objectTypesUrl: string,
     moduleName = 'i3X_Connector'
 ): Promise<ImplementEntityResult> {
     const sp = getStudioPro();
-    const entityName = objectName.trim();
+    const baseEntityName = toModelName(selectedObject.displayName);
 
-    if (!entityName) {
+    if (!baseEntityName) {
         throw new Error('Selected object has no valid name.');
     }
 
@@ -34,13 +237,239 @@ export async function implementObjectAsEntity(
         throw new Error(`Module '${moduleName}' was not found or has no domain model.`);
     }
 
-    const existingEntity = domainModel.getEntity(entityName);
-    if (existingEntity) {
-        return { entityName, created: false };
+    // ── Layout constants ─────────────────────────────────────────────────────
+    // Base entity sits on the left; group entities fan out in a column to the right.
+    // Heights grow with attribute count: header (~30px) + ~20px per attribute.
+    const ATTR_ROW_H    = 20;    // px per attribute row
+    const ENTITY_HDR_H  = 30;    // px for entity header
+    const H_GAP         = 80;    // horizontal gap between base and group column
+    const V_GAP         = 40;    // vertical gap between group entities
+    const BASE_WIDTH    = 200;   // base entity column width
+
+    function entityHeight(attrCount: number): number {
+        return ENTITY_HDR_H + Math.max(1, attrCount) * ATTR_ROW_H;
     }
 
-    await domainModel.addEntity({ name: entityName });
+    // Count attributes per entity upfront so we can compute layout before creation.
+    const allProperties = selectedObject.schema.properties ?? {};
+
+    // Both object-type groups and array-type groups become associated entities.
+    const groupEntryList = Object.entries(allProperties).filter(([, p]) =>
+        isGroupProperty(p) || (isArrayProperty(p) && extractArrayItemProperties(p) !== null)
+    );
+    const leafCount = Object.entries(allProperties).filter(
+        ([, p]) => !isGroupProperty(p) && !isArrayProperty(p)
+    ).length;
+    const baseHeight = entityHeight(leafCount);
+
+    // Pick a starting Y below the lowest existing entity to avoid overlap.
+    let startY = 0;
+    for (const ent of domainModel.entities) {
+        const bottom = ent.location.y + ENTITY_HDR_H + ATTR_ROW_H + V_GAP;
+        if (bottom > startY) startY = bottom;
+    }
+
+    // Centre the base entity vertically against the group column.
+    const groupColumnHeight = groupEntryList.reduce((sum, [, p]) => {
+        const attrCount = isGroupProperty(p)
+            ? Object.keys(p.properties ?? {}).length
+            : Object.keys(extractArrayItemProperties(p as never) ?? {}).length;
+        return sum + entityHeight(attrCount) + V_GAP;
+    }, -V_GAP); // subtract one trailing gap
+    const baseY = startY + Math.max(0, (groupColumnHeight - baseHeight) / 2);
+
+    let baseEntityCreated = false;
+    if (!domainModel.getEntity(baseEntityName)) {
+        await domainModel.addEntity({ name: baseEntityName });
+        baseEntityCreated = true;
+    }
+
+    // Position the base entity.
+    const baseEntityObj = domainModel.getEntity(baseEntityName);
+    if (baseEntityObj && baseEntityCreated) {
+        baseEntityObj.location = { x: 0, y: baseY };
+    }
+
+    const properties = selectedObject.schema.properties ?? {};
+    let groupEntitiesCreated = 0;
+    let attributesCreated = 0;
+    let associationsCreated = 0;
+    let groupIndex = 0;
+
+    for (const [propertyName, property] of Object.entries(properties)) {
+        const isResolvableArray = isArrayProperty(property) && extractArrayItemProperties(property) !== null;
+        if (isGroupProperty(property) || isResolvableArray) {
+            const preferredGroupEntityName = `${baseEntityName}_${propertyName}`;
+            const groupEntityInfo = getOrCreateEntityName(domainModel, preferredGroupEntityName);
+
+            if (groupEntityInfo.created) {
+                await domainModel.addEntity({ name: groupEntityInfo.name });
+                groupEntitiesCreated += 1;
+            }
+
+            const groupEntity = domainModel.getEntity(groupEntityInfo.name);
+            if (!groupEntity) {
+                throw new Error(`Failed to access generated entity '${groupEntityInfo.name}'.`);
+            }
+
+            // Position new group entity to the right of the base entity.
+            if (groupEntityInfo.created) {
+                // Compute Y by summing heights of all preceding group entities.
+                let groupY = startY;
+                for (let i = 0; i < groupIndex; i++) {
+                    const [, prevProp] = groupEntryList[i];
+                    const prevAttrCount = isGroupProperty(prevProp)
+                        ? Object.keys((prevProp as { properties?: Record<string, unknown> }).properties ?? {}).length
+                        : Object.keys(extractArrayItemProperties(prevProp as never) ?? {}).length;
+                    groupY += entityHeight(prevAttrCount) + V_GAP;
+                }
+                groupEntity.location = { x: BASE_WIDTH + H_GAP, y: groupY };
+            }
+            groupIndex += 1;
+
+            // Arrays get many-to-many (a list of items); objects get one-to-many.
+            const isArray = isArrayProperty(property);
+            const assocName = `${baseEntityName}_${groupEntityInfo.name}`;
+            if (!domainModel.getAssociation(assocName)) {
+                const baseEntity = domainModel.getEntity(baseEntityName);
+                if (baseEntity) {
+                    await domainModel.addAssociation({
+                        name: assocName,
+                        parentEntity: baseEntity,
+                        childEntity: groupEntity,
+                        multiplicity: isArray ? 'many_to_many' : 'one_to_many',
+                    });
+                    associationsCreated += 1;
+                }
+            }
+
+            // Resolve the leaf properties to add as attributes.
+            const leafProperties = isGroupProperty(property)
+                ? property.properties
+                : (extractArrayItemProperties(property) ?? {});
+
+            for (const [leafName, leafProperty] of Object.entries(leafProperties)) {
+                const attributeName = toModelName(leafName);
+                if (groupEntity.getAttribute(attributeName)) {
+                    continue;
+                }
+
+                const attributeType = getAttributeType(leafProperty);
+                const attributeOptions: DomainModels.AttributeCreationOptions = {
+                    name: attributeName,
+                    ...(attributeType ? { type: attributeType } : {}),
+                };
+
+                await groupEntity.addAttribute(attributeOptions);
+                attributesCreated += 1;
+            }
+            continue;
+        }
+
+        // Skip array properties with no resolvable item schema — nothing to map.
+        if (isArrayProperty(property)) {
+            continue;
+        }
+
+        const baseEntity = domainModel.getEntity(baseEntityName);
+        if (!baseEntity) {
+            throw new Error(`Failed to access base entity '${baseEntityName}'.`);
+        }
+
+        const attributeName = toModelName(propertyName);
+        if (baseEntity.getAttribute(attributeName)) {
+            continue;
+        }
+
+        const attributeType = getAttributeType(property);
+        const attributeOptions: DomainModels.AttributeCreationOptions = {
+            name: attributeName,
+            ...(attributeType ? { type: attributeType } : {}),
+        };
+
+        await baseEntity.addAttribute(attributeOptions);
+        attributesCreated += 1;
+    }
+
     await sp.app.model.domainModels.save(domainModel);
 
-    return { entityName, created: true };
+    // ── JSON Structure ───────────────────────────────────────────────────────
+    // Fetch /objects?typeId=<name> using the same base URL the user loaded
+    // object types from, then store the result as the JSON Structure snippet.
+    const jsonStructureName = `JSON_${baseEntityName}`;
+    const microflowName = `MF_${baseEntityName}`;
+    let jsonStructureCreated = false;
+    let microflowCreated = false;
+
+    // Derive the objects endpoint: replace the path ending in /objecttypes with
+    // /objects, then append the typeId query parameter.
+    const objectsUrl = getObjectsUrl(objectTypesUrl, baseEntityName);
+
+    let jsonSnippet: string;
+    if (objectsUrl) {
+        try {
+            const proxyUrl = await sp.network.httpProxy.getProxyUrl(objectsUrl);
+            const response = await fetch(proxyUrl, { headers: { accept: 'application/json' } });
+            if (response.ok) {
+                const data = await response.json();
+                jsonSnippet = JSON.stringify(sanitizeJsonForMendixLimits(data), null, 2);
+            } else {
+                // Fall back to the schema if the objects endpoint fails.
+                jsonSnippet = JSON.stringify(sanitizeJsonForMendixLimits(selectedObject), null, 2);
+            }
+        } catch {
+            jsonSnippet = JSON.stringify(sanitizeJsonForMendixLimits(selectedObject), null, 2);
+        }
+    } else {
+        jsonSnippet = JSON.stringify(sanitizeJsonForMendixLimits(selectedObject), null, 2);
+    }
+
+    const module = await sp.app.model.projects.getModule(moduleName);
+    if (module) {
+        // ── JSON Structure ────────────────────────────────────────────
+        const existingStructures = await sp.app.model.jsonStructures.getUnitsInfo();
+        const existingJsonInfo = existingStructures.find(
+            u => u.moduleName === moduleName && u.name === jsonStructureName
+        );
+
+        if (existingJsonInfo) {
+            // Already exists — update the snippet to reflect the latest data.
+            const loaded = await sp.app.model.jsonStructures.loadAll(
+                u => u.$ID === existingJsonInfo.$ID
+            );
+            if (loaded.length > 0) {
+                loaded[0].jsonSnippet = jsonSnippet;
+                await sp.app.model.jsonStructures.save(loaded[0]);
+            }
+        } else {
+            // New — create with the snippet pre-populated.
+            await sp.app.model.jsonStructures.addJsonStructure(
+                module.$ID,
+                { name: jsonStructureName, jsonSnippet }
+            );
+            jsonStructureCreated = true;
+        }
+
+        if (objectsUrl) {
+            microflowCreated = await ensureMicroflowForObject(
+                sp,
+                module.$ID,
+                moduleName,
+                microflowName,
+                objectsUrl
+            );
+        }
+    }
+
+    return {
+        baseEntityName,
+        baseEntityCreated,
+        groupEntitiesCreated,
+        attributesCreated,
+        associationsCreated,
+        jsonStructureName,
+        jsonStructureCreated,
+        microflowName,
+        microflowCreated,
+    };
 }
