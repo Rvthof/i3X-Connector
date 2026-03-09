@@ -29,6 +29,11 @@ export interface ImplementEntityResult {
     microflowCreated: boolean;
 }
 
+export interface SubscribeMicroflowResult {
+    microflowName: string;
+    microflowCreated: boolean;
+}
+
 type MendixAttributeType = NonNullable<DomainModels.AttributeCreationOptions['type']>;
 const MENDIX_LONG_MIN = Number('-9223372036854775808');
 const MENDIX_LONG_MAX = Number('9223372036854775807');
@@ -121,6 +126,22 @@ function getObjectsUrl(objectTypesUrl: string, typeId: string): string | null {
         }
         u.search = '';
         u.searchParams.set('typeId', typeId);
+        return u.toString();
+    } catch {
+        return null;
+    }
+}
+
+function getObjectsValueUrl(apiUrl: string): string | null {
+    try {
+        const u = new URL(apiUrl);
+        const trimmedPath = u.pathname.replace(/\/+$/, '');
+        if (/\/objecttypes$/i.test(trimmedPath)) {
+            u.pathname = trimmedPath.replace(/\/objecttypes$/i, '/objects/value');
+        } else {
+            u.pathname = `${trimmedPath}/objects/value`.replace(/\/{2,}/g, '/');
+        }
+        u.search = '';
         return u.toString();
     } catch {
         return null;
@@ -310,6 +331,149 @@ async function ensureMicroflowForObject(
 
     await sp.app.model.microflows.save(microflow);
     return true;
+}
+
+export async function createSubscriptionMicroflow(
+    objectType: ObjectType,
+    selectedObject: { elementId: string; displayName: string },
+    apiUrl: string,
+    moduleName = 'i3X_Connector'
+): Promise<SubscribeMicroflowResult> {
+    const sp = getStudioPro();
+    const objectTypeName = toModelName(objectType.displayName);
+    const objectDisplayName = toModelName(selectedObject.displayName);
+    const selectedElementId = selectedObject.elementId.trim();
+    const microflowName = `MF_${objectTypeName}_${objectDisplayName}`;
+
+    if (!selectedElementId) {
+        throw new Error('Selected object has no valid elementId.');
+    }
+
+    const objectsValueUrl = getObjectsValueUrl(apiUrl);
+    if (!objectsValueUrl) {
+        throw new Error(`Cannot build /objects/value URL from '${apiUrl}'.`);
+    }
+
+    const module = await sp.app.model.projects.getModule(moduleName);
+    if (!module) {
+        throw new Error(`Module '${moduleName}' was not found.`);
+    }
+
+    const existingMicroflows = await sp.app.model.microflows.loadAll(
+        unitInfo => unitInfo.moduleName === moduleName && unitInfo.name === microflowName,
+        1
+    );
+    if (existingMicroflows.length > 0) {
+        return { microflowName, microflowCreated: false };
+    }
+
+    const microflow = await sp.app.model.microflows.addMicroflow(module.$ID, { name: microflowName });
+    const actionActivity = (await sp.app.model.microflows.createElement(
+        'Microflows$ActionActivity'
+    )) as Microflows.ActionActivity;
+    const restCall = (await sp.app.model.microflows.createElement(
+        'Microflows$RestCallAction'
+    )) as Microflows.RestCallAction;
+    const httpConfiguration = (await sp.app.model.microflows.createElement(
+        'Microflows$HttpConfiguration'
+    )) as Microflows.HttpConfiguration;
+    const requestHandler = (await sp.app.model.microflows.createElement(
+        'Microflows$CustomRequestHandling'
+    )) as Microflows.CustomRequestHandling;
+    const requestTemplate = (await sp.app.model.microflows.createElement(
+        'Microflows$StringTemplate'
+    )) as Microflows.StringTemplate;
+    const locationTemplate = (await sp.app.model.microflows.createElement(
+        'Microflows$StringTemplate'
+    )) as Microflows.StringTemplate;
+    const locationTemplateArg = (await sp.app.model.microflows.createElement(
+        'Microflows$TemplateArgument'
+    )) as Microflows.TemplateArgument;
+    const resultHandling = (await sp.app.model.microflows.createElement(
+        'Microflows$ResultHandling'
+    )) as Microflows.ResultHandling;
+    const stringType = await sp.app.model.microflows.createElement('DataTypes$StringType');
+
+    requestTemplate.text = `{{\n  "elementIds": [\n    "${selectedElementId}"\n  ],\n  "maxDepth": 1\n}`;
+    requestHandler.template = requestTemplate;
+    restCall.requestHandling = requestHandler;
+    restCall.requestHandlingType = 'Custom';
+
+    httpConfiguration.overrideLocation = true;
+    locationTemplate.text = '{1}';
+    locationTemplateArg.expression = `'${objectsValueUrl}'`;
+    locationTemplate.arguments = [locationTemplateArg];
+    httpConfiguration.customLocationTemplate = locationTemplate;
+    restCall.httpConfiguration = httpConfiguration;
+
+    resultHandling.storeInVariable = true;
+    resultHandling.outputVariableName = 'ResponseBody';
+    resultHandling.variableType = stringType as typeof resultHandling.variableType;
+    restCall.resultHandling = resultHandling;
+    restCall.resultHandlingType = 'String';
+    restCall.errorResultHandlingType = 'None';
+
+    actionActivity.action = restCall;
+    actionActivity.size = { width: 120, height: 60 };
+    actionActivity.relativeMiddlePoint = { x: 400, y: 200 };
+    microflow.objectCollection.objects.push(actionActivity);
+
+    const exclusiveSplit = (await sp.app.model.microflows.createElement(
+        'Microflows$ExclusiveSplit'
+    )) as Microflows.ExclusiveSplit;
+    const splitCondition = (await sp.app.model.microflows.createElement(
+        'Microflows$ExpressionSplitCondition'
+    )) as Microflows.ExpressionSplitCondition;
+    splitCondition.expression = '$latestHttpResponse/StatusCode = 200';
+    exclusiveSplit.splitCondition = splitCondition;
+    exclusiveSplit.size = { width: 60, height: 60 };
+    exclusiveSplit.relativeMiddlePoint = { x: 600, y: 200 };
+    microflow.objectCollection.objects.push(exclusiveSplit);
+
+    if (microflow.flows.length > 0) {
+        microflow.flows.pop();
+    }
+
+    const startEvent = microflow.objectCollection.objects[0];
+    const endEvent = microflow.objectCollection.objects[1];
+    endEvent.relativeMiddlePoint = { x: 900, y: 200 };
+    microflow.flows.push(await createSequenceFlow(sp, startEvent.$ID, actionActivity.$ID));
+    microflow.flows.push(await createSequenceFlow(sp, actionActivity.$ID, exclusiveSplit.$ID));
+
+    const successActivity = await createMessageActivity(
+        sp,
+        'Information',
+        'Successfully received response from i3X API. Response: {1}',
+        ['$ResponseBody'],
+        'en_US'
+    );
+    successActivity.size = { width: 120, height: 60 };
+    successActivity.relativeMiddlePoint = { x: 800, y: 200 };
+    microflow.objectCollection.objects.push(successActivity);
+    microflow.flows.push(await createSequenceFlow(sp, exclusiveSplit.$ID, successActivity.$ID, true));
+    microflow.flows.push(await createSequenceFlow(sp, successActivity.$ID, endEvent.$ID));
+
+    const errorActivity = await createMessageActivity(
+        sp,
+        'Error',
+        'Error: Received status code {1} from i3X API.',
+        ['toString($latestHttpResponse/StatusCode)'],
+        'en_US'
+    );
+    errorActivity.size = { width: 120, height: 60 };
+    errorActivity.relativeMiddlePoint = { x: 800, y: 300 };
+    microflow.objectCollection.objects.push(errorActivity);
+    microflow.flows.push(await createSequenceFlow(sp, exclusiveSplit.$ID, errorActivity.$ID, false));
+
+    const errorEndEvent = (await sp.app.model.microflows.createElement(
+        'Microflows$EndEvent'
+    )) as Microflows.EndEvent;
+    errorEndEvent.relativeMiddlePoint = { x: 900, y: 300 };
+    microflow.objectCollection.objects.push(errorEndEvent);
+    microflow.flows.push(await createSequenceFlow(sp, errorActivity.$ID, errorEndEvent.$ID));
+
+    await sp.app.model.microflows.save(microflow);
+    return { microflowName, microflowCreated: true };
 }
 
 export async function implementObjectAsEntity(

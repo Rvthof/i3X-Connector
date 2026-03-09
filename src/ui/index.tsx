@@ -116,6 +116,8 @@ export const component: IComponent = {
                     />
                     {selectedItem && (
                         <DetailPanel
+                            context={componentContext}
+                            apiUrl={apiUrl}
                             item={selectedItem}
                             onClose={() => setSelectedItem(null)}
                             onImplement={handleImplement}

@@ -1,8 +1,12 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { ComponentContext, getStudioProApi } from '@mendix/extensions-api';
 import styles from '../index.module.css';
 import { ObjectType, AnyProperty, isGroupProperty, isArrayProperty, extractArrayItemProperties } from '../types';
+import { createSubscriptionMicroflow } from '../services/studioProService';
 
 interface Props {
+    context: ComponentContext;
+    apiUrl: string;
     item: ObjectType;
     onClose: () => void;
     onImplement: (item: ObjectType) => Promise<void>;
@@ -158,10 +162,46 @@ const GroupSection: React.FC<{ name: string; prop: AnyProperty; topRequired: str
     );
 };
 
+function flattenObjectToColumns(
+    value: unknown,
+    prefix = '',
+    out: Record<string, string> = {}
+): Record<string, string> {
+    if (value === null || value === undefined) {
+        if (prefix) out[prefix] = '—';
+        return out;
+    }
+
+    if (Array.isArray(value)) {
+        if (prefix) out[prefix] = JSON.stringify(value);
+        return out;
+    }
+
+    if (typeof value === 'object') {
+        for (const [key, child] of Object.entries(value)) {
+            const nextPrefix = prefix ? `${prefix}.${key}` : key;
+            flattenObjectToColumns(child, nextPrefix, out);
+        }
+        return out;
+    }
+
+    if (prefix) {
+        out[prefix] = String(value);
+    }
+    return out;
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
-const DetailPanel: React.FC<Props> = ({ item, onClose, onImplement }) => {
+const DetailPanel: React.FC<Props> = ({ context, apiUrl, item, onClose, onImplement }) => {
+    const studioPro = getStudioProApi(context);
     const [isImplementing, setIsImplementing] = useState(false);
+    const [activeTab, setActiveTab] = useState<'attributes' | 'objects'>('attributes');
+    const [isLoadingObjects, setIsLoadingObjects] = useState(true);
+    const [isSubscribing, setIsSubscribing] = useState(false);
+    const [retrievedObjects, setRetrievedObjects] = useState<unknown[]>([]);
+    const [objectsLoadError, setObjectsLoadError] = useState<string | null>(null);
+    const [selectedObjectIndex, setSelectedObjectIndex] = useState<number | null>(null);
     const schema = item.schema;
     const properties = schema.properties ?? {};
     const topRequired = schema.required ?? [];
@@ -177,6 +217,21 @@ const DetailPanel: React.FC<Props> = ({ item, onClose, onImplement }) => {
     }, 0);
 
     const shortNs = (uri: string) => uri.split('/').filter(Boolean).pop() ?? uri;
+    const flattenedObjects = useMemo(
+        () => retrievedObjects.map(obj => flattenObjectToColumns(obj)),
+        [retrievedObjects]
+    );
+    const objectColumns = useMemo(
+        () =>
+            Array.from(new Set(flattenedObjects.flatMap(obj => Object.keys(obj))))
+                .filter(column => {
+                    const lastSegment = column.split('.').pop()?.toLowerCase() ?? '';
+                    return lastSegment !== 'typeid' && lastSegment !== 'namespaceuri';
+                }),
+        [flattenedObjects]
+    );
+    const isElementIdColumn = (column: string) =>
+        (column.split('.').pop()?.toLowerCase() ?? '') === 'elementid';
 
     const handleImplement = async () => {
         if (isImplementing) return;
@@ -185,6 +240,121 @@ const DetailPanel: React.FC<Props> = ({ item, onClose, onImplement }) => {
             await onImplement(item);
         } finally {
             setIsImplementing(false);
+        }
+    };
+
+    const buildObjectsUrl = (): string | null => {
+        try {
+            const u = new URL(apiUrl);
+            const trimmedPath = u.pathname.replace(/\/+$/, '');
+            if (/\/objecttypes$/i.test(trimmedPath)) {
+                u.pathname = trimmedPath.replace(/\/objecttypes$/i, '/objects');
+            } else {
+                u.pathname = `${trimmedPath}/objects`.replace(/\/{2,}/g, '/');
+            }
+            u.search = '';
+            u.searchParams.set('typeId', item.elementId);
+            return u.toString();
+        } catch {
+            return null;
+        }
+    };
+
+    useEffect(() => {
+        let cancelled = false;
+
+        const loadObjects = async () => {
+            setIsLoadingObjects(true);
+            setObjectsLoadError(null);
+            setRetrievedObjects([]);
+            setSelectedObjectIndex(null);
+
+            const objectsUrl = buildObjectsUrl();
+            if (!objectsUrl) {
+                if (!cancelled) {
+                    setObjectsLoadError(`Cannot build objects URL from '${apiUrl}'.`);
+                    setIsLoadingObjects(false);
+                }
+                return;
+            }
+
+            try {
+                const proxy = await studioPro.network.httpProxy.getProxyUrl(objectsUrl);
+                const response = await fetch(proxy, { headers: { accept: 'application/json' } });
+                if (!response.ok) {
+                    if (!cancelled) {
+                        setObjectsLoadError(`Status: ${response.status}`);
+                    }
+                    return;
+                }
+
+                const data = await response.json();
+                const objects = Array.isArray(data) ? data : [data];
+                if (!cancelled) {
+                    setRetrievedObjects(objects);
+                    setSelectedObjectIndex(objects.length > 0 ? 0 : null);
+                }
+            } catch (error) {
+                if (!cancelled) {
+                    setObjectsLoadError(error instanceof Error ? error.message : String(error));
+                }
+            } finally {
+                if (!cancelled) {
+                    setIsLoadingObjects(false);
+                }
+            }
+        };
+
+        setActiveTab('attributes');
+        void loadObjects();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [apiUrl, item.elementId, studioPro.network.httpProxy]);
+
+    const handleSubscribe = async () => {
+        if (selectedObjectIndex === null || isSubscribing) return;
+
+        const selected = retrievedObjects[selectedObjectIndex];
+        if (!selected || typeof selected !== 'object') {
+            await studioPro.ui.messageBoxes.show('error', 'Invalid selected object', 'Could not read selected object data.');
+            return;
+        }
+
+        const selectedRecord = selected as Record<string, unknown>;
+        const findField = (fieldName: string): unknown =>
+            Object.entries(selectedRecord).find(([k]) => k.toLowerCase() === fieldName.toLowerCase())?.[1];
+
+        const elementIdValue = findField('elementId');
+        if (typeof elementIdValue !== 'string' || !elementIdValue.trim()) {
+            await studioPro.ui.messageBoxes.show('error', 'Missing elementId', 'Selected object does not contain a valid elementId.');
+            return;
+        }
+
+        const displayNameValue =
+            typeof findField('displayName') === 'string' && (findField('displayName') as string).trim()
+                ? (findField('displayName') as string)
+                : elementIdValue;
+
+        setIsSubscribing(true);
+        try {
+            const result = await createSubscriptionMicroflow(
+                item,
+                { elementId: elementIdValue, displayName: displayNameValue },
+                apiUrl,
+                'i3X_Connector'
+            );
+            await studioPro.ui.notifications.show({
+                title: result.microflowCreated ? 'Subscription microflow created' : 'Subscription microflow already exists',
+                message: result.microflowName,
+                displayDurationInSeconds: 6,
+            });
+        } catch (error) {
+            const details = error instanceof Error ? error.message : String(error);
+            await studioPro.ui.messageBoxes.show('error', 'Could not create subscription microflow', details);
+        } finally {
+            setIsSubscribing(false);
         }
     };
 
@@ -238,8 +408,91 @@ const DetailPanel: React.FC<Props> = ({ item, onClose, onImplement }) => {
                 <p className={styles.detailDescription}>{schema.description}</p>
             )}
 
-            {/* Properties */}
-            {entries.length > 0 ? (
+            <div className={styles.detailTabs}>
+                <button
+                    className={`${styles.detailTabButton} ${activeTab === 'attributes' ? styles.detailTabButtonActive : ''}`}
+                    onClick={() => setActiveTab('attributes')}
+                >
+                    Attributes
+                </button>
+                <button
+                    className={`${styles.detailTabButton} ${activeTab === 'objects' ? styles.detailTabButtonActive : ''}`}
+                    onClick={() => setActiveTab('objects')}
+                >
+                    Objects
+                </button>
+            </div>
+
+            {/* Properties or retrieved objects */}
+            {activeTab === 'objects' ? (
+                <div className={styles.detailSection}>
+                    {isLoadingObjects ? (
+                        <p className={styles.noPropsMessage}>Loading objects...</p>
+                    ) : objectsLoadError ? (
+                        <p className={styles.noPropsMessage}>Could not load objects: {objectsLoadError}</p>
+                    ) : retrievedObjects.length === 0 ? (
+                        <p className={styles.noPropsMessage}>No objects returned for this type.</p>
+                    ) : (
+                        <>
+                            <table className={styles.pipelineTable}>
+                                <thead>
+                                    <tr className={styles.tableHeader}>
+                                        <th className={styles.tableHeaderCell} style={{ width: 44, minWidth: 44 }}>#</th>
+                                        {objectColumns.map(column => (
+                                            <th
+                                                key={column}
+                                                className={styles.tableHeaderCell}
+                                                style={isElementIdColumn(column) ? { minWidth: 360, width: 360 } : undefined}
+                                            >
+                                                {column}
+                                            </th>
+                                        ))}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {flattenedObjects.map((obj, index) => (
+                                        <tr
+                                            key={index}
+                                            onClick={() => setSelectedObjectIndex(index)}
+                                            className={`${styles.tableRow} ${selectedObjectIndex === index ? styles.selected : ''}`}
+                                        >
+                                            <td className={styles.tableCell} style={{ width: 44, minWidth: 44 }}>{index + 1}</td>
+                                            {objectColumns.map(column => {
+                                                const cellValue = obj[column] ?? '—';
+                                                const valueText = String(cellValue);
+                                                return (
+                                                    <td
+                                                        key={column}
+                                                        className={`${styles.tableCell} ${styles.descCell}`}
+                                                        title={valueText}
+                                                        style={{
+                                                            ...(isElementIdColumn(column) ? { minWidth: 360 } : {}),
+                                                            whiteSpace: 'nowrap',
+                                                            overflow: 'hidden',
+                                                            textOverflow: 'ellipsis',
+                                                        }}
+                                                    >
+                                                        {valueText}
+                                                    </td>
+                                                );
+                                            })}
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                            <div className={styles.objectActions}>
+                                <button
+                                    className={styles.implementButton}
+                                    onClick={handleSubscribe}
+                                    disabled={selectedObjectIndex === null || isSubscribing}
+                                >
+                                    {isSubscribing ? 'Subscribing...' : 'Subscribe to values directly'}
+                                </button>
+                            </div>
+                        </>
+                    )}
+                </div>
+            ) : entries.length > 0 ? (
                 <div className={styles.detailSection}>
                     <table className={styles.propTable}>
                         <thead>

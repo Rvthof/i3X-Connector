@@ -506,6 +506,38 @@
     border-bottom: 1px solid var(--border);
 }
 
+.detailTabs {
+    display: flex;
+    gap: 8px;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-page);
+}
+
+.detailTabButton {
+    height: 30px;
+    padding: 0 12px;
+    background: var(--bg-card);
+    color: var(--text-body);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.detailTabButtonActive {
+    background: var(--primary);
+    color: #fff;
+    border-color: var(--primary);
+}
+
+.objectActions {
+    margin-top: 12px;
+    display: flex;
+    gap: 8px;
+}
+
 /* Sections */
 .detailSection {
     padding: 16px 20px;
