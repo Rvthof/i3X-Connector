@@ -25,6 +25,8 @@ export interface ImplementEntityResult {
     associationsCreated: number;
     jsonStructureName: string;
     jsonStructureCreated: boolean;
+    importMappingName: string;
+    importMappingCreated: boolean;
     microflowName: string;
     microflowCreated: boolean;
 }
@@ -330,6 +332,7 @@ async function ensureMicroflowForObject(
     microflow.flows.push(await createSequenceFlow(sp, errorActivity.$ID, errorEndEvent.$ID));
 
     await sp.app.model.microflows.save(microflow);
+
     return true;
 }
 
@@ -591,8 +594,8 @@ export async function implementObjectAsEntity(
                 if (baseEntity) {
                     await domainModel.addAssociation({
                         name: assocName,
-                        parentEntity: baseEntity,
-                        childEntity: groupEntity,
+                        parentEntity: baseEntity.$ID,
+                        childEntity: groupEntity.$ID,
                         multiplicity: isArray ? 'many_to_many' : 'one_to_many',
                     });
                     associationsCreated += 1;
@@ -653,8 +656,10 @@ export async function implementObjectAsEntity(
     // Fetch /objects?typeId=<name> using the same base URL the user loaded
     // object types from, then store the result as the JSON Structure snippet.
     const jsonStructureName = `JSON_${baseEntityName}`;
+    const importMappingName = `IM_${baseEntityName}`;
     const microflowName = `MF_${baseEntityName}`;
     let jsonStructureCreated = false;
+    let importMappingCreated = false;
     let microflowCreated = false;
 
     // Derive the objects endpoint: replace the path ending in /objecttypes with
@@ -706,6 +711,28 @@ export async function implementObjectAsEntity(
             jsonStructureCreated = true;
         }
 
+        // ── Import Mapping ────────────────────────────────────────
+        const jsonStructureQualifiedName = `${moduleName}.${jsonStructureName}`;
+        const existingMappings = await sp.app.model.importMappings.getUnitsInfo();
+        const existingMappingInfo = existingMappings.find(
+            u => u.moduleName === moduleName && u.name === importMappingName
+        );
+
+        if (!existingMappingInfo) {
+            const mapping = await sp.app.model.importMappings.addImportMapping(
+                module.$ID,
+                {
+                    name: importMappingName,
+                    selectStructure: {
+                        structureType: 'jsonStructure',
+                        structureQualifiedName: jsonStructureQualifiedName,
+                        mapElements: { mappingType: 'automatic' },
+                    },
+                }
+            );
+            importMappingCreated = true;
+        }
+
         if (objectsUrl) {
             microflowCreated = await ensureMicroflowForObject(
                 sp,
@@ -725,6 +752,8 @@ export async function implementObjectAsEntity(
         associationsCreated,
         jsonStructureName,
         jsonStructureCreated,
+        importMappingName,
+        importMappingCreated,
         microflowName,
         microflowCreated,
     };
