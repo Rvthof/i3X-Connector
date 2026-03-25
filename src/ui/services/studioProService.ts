@@ -3,6 +3,7 @@ import type { DomainModels } from '@mendix/extensions-api';
 import type { Microflows } from '@mendix/extensions-api';
 import type { Texts } from '@mendix/extensions-api';
 import { isGroupProperty, isArrayProperty, extractArrayItemProperties, type LeafProperty, type ObjectType } from '../types';
+import { getObjectsUrl, getObjectsValueUrl } from './i3xUrl';
 
 let studioPro: StudioProApi | null = null;
 
@@ -31,7 +32,7 @@ export interface ImplementEntityResult {
     microflowCreated: boolean;
 }
 
-export interface SubscribeMicroflowResult {
+export interface QueryValuesMicroflowResult {
     microflowName: string;
     microflowCreated: boolean;
 }
@@ -115,39 +116,6 @@ function getOrCreateEntityName(
         return { name: normalized, created: false };
     }
     return { name: normalized, created: true };
-}
-
-function getObjectsUrl(objectTypesUrl: string, typeId: string): string | null {
-    try {
-        const u = new URL(objectTypesUrl);
-        const trimmedPath = u.pathname.replace(/\/+$/, '');
-        if (/\/objecttypes$/i.test(trimmedPath)) {
-            u.pathname = trimmedPath.replace(/\/objecttypes$/i, '/objects');
-        } else {
-            u.pathname = `${trimmedPath}/objects`.replace(/\/{2,}/g, '/');
-        }
-        u.search = '';
-        u.searchParams.set('typeId', typeId);
-        return u.toString();
-    } catch {
-        return null;
-    }
-}
-
-function getObjectsValueUrl(apiUrl: string): string | null {
-    try {
-        const u = new URL(apiUrl);
-        const trimmedPath = u.pathname.replace(/\/+$/, '');
-        if (/\/objecttypes$/i.test(trimmedPath)) {
-            u.pathname = trimmedPath.replace(/\/objecttypes$/i, '/objects/value');
-        } else {
-            u.pathname = `${trimmedPath}/objects/value`.replace(/\/{2,}/g, '/');
-        }
-        u.search = '';
-        return u.toString();
-    } catch {
-        return null;
-    }
 }
 
 async function createSequenceFlow(
@@ -336,12 +304,12 @@ async function ensureMicroflowForObject(
     return true;
 }
 
-export async function createSubscriptionMicroflow(
+export async function createQueryValuesMicroflow(
     objectType: ObjectType,
     selectedObject: { elementId: string; displayName: string },
-    apiUrl: string,
+    apiBaseUrl: string,
     moduleName = 'i3X_Connector'
-): Promise<SubscribeMicroflowResult> {
+): Promise<QueryValuesMicroflowResult> {
     const sp = getStudioPro();
     const objectTypeName = toModelName(objectType.displayName);
     const objectDisplayName = toModelName(selectedObject.displayName);
@@ -352,9 +320,9 @@ export async function createSubscriptionMicroflow(
         throw new Error('Selected object has no valid elementId.');
     }
 
-    const objectsValueUrl = getObjectsValueUrl(apiUrl);
+    const objectsValueUrl = getObjectsValueUrl(apiBaseUrl);
     if (!objectsValueUrl) {
-        throw new Error(`Cannot build /objects/value URL from '${apiUrl}'.`);
+        throw new Error(`Cannot build /objects/value URL from '${apiBaseUrl}'.`);
     }
 
     const module = await sp.app.model.projects.getModule(moduleName);
@@ -407,6 +375,15 @@ export async function createSubscriptionMicroflow(
     locationTemplateArg.expression = `'${objectsValueUrl}'`;
     locationTemplate.arguments = [locationTemplateArg];
     httpConfiguration.customLocationTemplate = locationTemplate;
+
+    // /objects/value expects JSON payload; include explicit headers for reliable POST handling.
+    const acceptHeader = await httpConfiguration.addHttpHeaderEntry();
+    acceptHeader.key = 'Accept';
+    acceptHeader.value = 'application/json';
+    const contentTypeHeader = await httpConfiguration.addHttpHeaderEntry();
+    contentTypeHeader.key = 'Content-Type';
+    contentTypeHeader.value = 'application/json';
+
     restCall.httpConfiguration = httpConfiguration;
 
     resultHandling.storeInVariable = true;
@@ -481,7 +458,7 @@ export async function createSubscriptionMicroflow(
 
 export async function implementObjectAsEntity(
     selectedObject: ObjectType,
-    objectTypesUrl: string,
+    apiBaseUrl: string,
     moduleName = 'i3X_Connector'
 ): Promise<ImplementEntityResult> {
     const sp = getStudioPro();
@@ -653,8 +630,8 @@ export async function implementObjectAsEntity(
     await sp.app.model.domainModels.save(domainModel);
 
     // ── JSON Structure ───────────────────────────────────────────────────────
-    // Fetch /objects?typeId=<name> using the same base URL the user loaded
-    // object types from, then store the result as the JSON Structure snippet.
+    // Fetch /objects?typeId=<elementId> using the user-supplied i3X base URL,
+    // then store the result as the JSON Structure snippet.
     const jsonStructureName = `JSON_${baseEntityName}`;
     const importMappingName = `IM_${baseEntityName}`;
     const microflowName = `MF_${baseEntityName}`;
@@ -662,9 +639,9 @@ export async function implementObjectAsEntity(
     let importMappingCreated = false;
     let microflowCreated = false;
 
-    // Derive the objects endpoint: replace the path ending in /objecttypes with
-    // /objects, then append the typeId query parameter.
-    const objectsUrl = getObjectsUrl(objectTypesUrl, baseEntityName);
+    // Derive the objects endpoint from base /i3x/ and append typeId.
+    const objectTypeId = selectedObject.elementId.trim();
+    const objectsUrl = objectTypeId ? getObjectsUrl(apiBaseUrl, objectTypeId) : null;
 
     let jsonSnippet: string;
     if (objectsUrl) {

@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { ComponentContext, getStudioProApi } from '@mendix/extensions-api';
 import styles from '../index.module.css';
 import { ObjectType, AnyProperty, isGroupProperty, isArrayProperty, extractArrayItemProperties } from '../types';
-import { createSubscriptionMicroflow } from '../services/studioProService';
+import { createQueryValuesMicroflow } from '../services/studioProService';
+import { getObjectsUrl } from '../services/i3xUrl';
 
 interface Props {
     context: ComponentContext;
@@ -198,7 +199,7 @@ const DetailPanel: React.FC<Props> = ({ context, apiUrl, item, onClose, onImplem
     const [isImplementing, setIsImplementing] = useState(false);
     const [activeTab, setActiveTab] = useState<'attributes' | 'objects'>('attributes');
     const [isLoadingObjects, setIsLoadingObjects] = useState(true);
-    const [isSubscribing, setIsSubscribing] = useState(false);
+    const [isCreatingQuery, setIsCreatingQuery] = useState(false);
     const [retrievedObjects, setRetrievedObjects] = useState<unknown[]>([]);
     const [objectsLoadError, setObjectsLoadError] = useState<string | null>(null);
     const [selectedObjectIndex, setSelectedObjectIndex] = useState<number | null>(null);
@@ -243,22 +244,7 @@ const DetailPanel: React.FC<Props> = ({ context, apiUrl, item, onClose, onImplem
         }
     };
 
-    const buildObjectsUrl = (): string | null => {
-        try {
-            const u = new URL(apiUrl);
-            const trimmedPath = u.pathname.replace(/\/+$/, '');
-            if (/\/objecttypes$/i.test(trimmedPath)) {
-                u.pathname = trimmedPath.replace(/\/objecttypes$/i, '/objects');
-            } else {
-                u.pathname = `${trimmedPath}/objects`.replace(/\/{2,}/g, '/');
-            }
-            u.search = '';
-            u.searchParams.set('typeId', item.elementId);
-            return u.toString();
-        } catch {
-            return null;
-        }
-    };
+    const buildObjectsUrl = (): string | null => getObjectsUrl(apiUrl, item.elementId);
 
     useEffect(() => {
         let cancelled = false;
@@ -313,8 +299,8 @@ const DetailPanel: React.FC<Props> = ({ context, apiUrl, item, onClose, onImplem
         };
     }, [apiUrl, item.elementId, studioPro.network.httpProxy]);
 
-    const handleSubscribe = async () => {
-        if (selectedObjectIndex === null || isSubscribing) return;
+    const handleCreateValueQuery = async () => {
+        if (selectedObjectIndex === null || isCreatingQuery) return;
 
         const selected = retrievedObjects[selectedObjectIndex];
         if (!selected || typeof selected !== 'object') {
@@ -337,24 +323,24 @@ const DetailPanel: React.FC<Props> = ({ context, apiUrl, item, onClose, onImplem
                 ? (findField('displayName') as string)
                 : elementIdValue;
 
-        setIsSubscribing(true);
+        setIsCreatingQuery(true);
         try {
-            const result = await createSubscriptionMicroflow(
+            const result = await createQueryValuesMicroflow(
                 item,
                 { elementId: elementIdValue, displayName: displayNameValue },
                 apiUrl,
                 'i3X_Connector'
             );
             await studioPro.ui.notifications.show({
-                title: result.microflowCreated ? 'Subscription microflow created' : 'Subscription microflow already exists',
+                title: result.microflowCreated ? 'Value query microflow created' : 'Value query microflow already exists',
                 message: result.microflowName,
                 displayDurationInSeconds: 6,
             });
         } catch (error) {
             const details = error instanceof Error ? error.message : String(error);
-            await studioPro.ui.messageBoxes.show('error', 'Could not create subscription microflow', details);
+            await studioPro.ui.messageBoxes.show('error', 'Could not create value query microflow', details);
         } finally {
-            setIsSubscribing(false);
+            setIsCreatingQuery(false);
         }
     };
 
@@ -483,10 +469,10 @@ const DetailPanel: React.FC<Props> = ({ context, apiUrl, item, onClose, onImplem
                             <div className={styles.objectActions}>
                                 <button
                                     className={styles.implementButton}
-                                    onClick={handleSubscribe}
-                                    disabled={selectedObjectIndex === null || isSubscribing}
+                                    onClick={handleCreateValueQuery}
+                                    disabled={selectedObjectIndex === null || isCreatingQuery}
                                 >
-                                    {isSubscribing ? 'Subscribing...' : 'Subscribe to values directly'}
+                                    {isCreatingQuery ? 'Creating query...' : 'Create last-known-value query microflow'}
                                 </button>
                             </div>
                         </>
