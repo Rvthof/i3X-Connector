@@ -1,10 +1,11 @@
 import { ComponentContext } from '@mendix/extensions-api';
 import { ObjectType } from './objecttype';
+import { ConnectionConfig } from './connection';
 
 export interface LoaderProps {
     context: ComponentContext;
     setApiData: (data: unknown) => void;
-    setApiUrl: (url: string) => void;
+    setConnection: (connection: ConnectionConfig) => void;
 }
 
 export interface ListProps {

@@ -2,8 +2,9 @@ import type { StudioProApi } from '@mendix/extensions-api';
 import type { DomainModels } from '@mendix/extensions-api';
 import type { Microflows } from '@mendix/extensions-api';
 import type { Texts } from '@mendix/extensions-api';
-import { isGroupProperty, isArrayProperty, extractArrayItemProperties, type LeafProperty, type ObjectType } from '../types';
+import { isGroupProperty, isArrayProperty, extractArrayItemProperties, type ConnectionConfig, type LeafProperty, type ObjectType } from '../types';
 import { getObjectsUrl, getObjectsValueUrl } from './i3xUrl';
+import { applyAuthToHttpConfiguration, buildI3xRequestHeaders } from './auth';
 
 let studioPro: StudioProApi | null = null;
 
@@ -184,7 +185,8 @@ async function ensureMicroflowForObject(
     moduleId: string,
     moduleName: string,
     microflowName: string,
-    objectsUrl: string
+    objectsUrl: string,
+    connection: ConnectionConfig
 ): Promise<boolean> {
     const existingMicroflows = await sp.app.model.microflows.loadAll(
         unitInfo => unitInfo.moduleName === moduleName && unitInfo.name === microflowName,
@@ -231,6 +233,7 @@ async function ensureMicroflowForObject(
     locationTemplateArg.expression = `'${objectsUrl}'`;
     locationTemplate.arguments = [locationTemplateArg];
     httpConfiguration.customLocationTemplate = locationTemplate;
+    await applyAuthToHttpConfiguration(httpConfiguration, connection.auth);
     restCall.httpConfiguration = httpConfiguration;
 
     resultHandling.storeInVariable = true;
@@ -307,7 +310,7 @@ async function ensureMicroflowForObject(
 export async function createQueryValuesMicroflow(
     objectType: ObjectType,
     selectedObject: { elementId: string; displayName: string },
-    apiBaseUrl: string,
+    connection: ConnectionConfig,
     moduleName = 'i3X_Connector'
 ): Promise<QueryValuesMicroflowResult> {
     const sp = getStudioPro();
@@ -320,9 +323,9 @@ export async function createQueryValuesMicroflow(
         throw new Error('Selected object has no valid elementId.');
     }
 
-    const objectsValueUrl = getObjectsValueUrl(apiBaseUrl);
+    const objectsValueUrl = getObjectsValueUrl(connection.apiBaseUrl);
     if (!objectsValueUrl) {
-        throw new Error(`Cannot build /objects/value URL from '${apiBaseUrl}'.`);
+        throw new Error(`Cannot build /objects/value URL from '${connection.apiBaseUrl}'.`);
     }
 
     const module = await sp.app.model.projects.getModule(moduleName);
@@ -375,6 +378,7 @@ export async function createQueryValuesMicroflow(
     locationTemplateArg.expression = `'${objectsValueUrl}'`;
     locationTemplate.arguments = [locationTemplateArg];
     httpConfiguration.customLocationTemplate = locationTemplate;
+    await applyAuthToHttpConfiguration(httpConfiguration, connection.auth);
 
     // /objects/value expects JSON payload; include explicit headers for reliable POST handling.
     const acceptHeader = await httpConfiguration.addHttpHeaderEntry();
@@ -458,7 +462,7 @@ export async function createQueryValuesMicroflow(
 
 export async function implementObjectAsEntity(
     selectedObject: ObjectType,
-    apiBaseUrl: string,
+    connection: ConnectionConfig,
     moduleName = 'i3X_Connector'
 ): Promise<ImplementEntityResult> {
     const sp = getStudioPro();
@@ -641,13 +645,13 @@ export async function implementObjectAsEntity(
 
     // Derive the objects endpoint from base /i3x/ and append typeId.
     const objectTypeId = selectedObject.elementId.trim();
-    const objectsUrl = objectTypeId ? getObjectsUrl(apiBaseUrl, objectTypeId) : null;
+    const objectsUrl = objectTypeId ? getObjectsUrl(connection.apiBaseUrl, objectTypeId) : null;
 
     let jsonSnippet: string;
     if (objectsUrl) {
         try {
             const proxyUrl = await sp.network.httpProxy.getProxyUrl(objectsUrl);
-            const response = await fetch(proxyUrl, { headers: { accept: 'application/json' } });
+            const response = await fetch(proxyUrl, { headers: buildI3xRequestHeaders(connection.auth) });
             if (response.ok) {
                 const data = await response.json();
                 jsonSnippet = JSON.stringify(sanitizeJsonForMendixLimits(data), null, 2);
@@ -716,7 +720,8 @@ export async function implementObjectAsEntity(
                 module.$ID,
                 moduleName,
                 microflowName,
-                objectsUrl
+                objectsUrl,
+                connection
             );
         }
     }

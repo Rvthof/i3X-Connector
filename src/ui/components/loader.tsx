@@ -3,19 +3,67 @@ import { getStudioProApi } from '@mendix/extensions-api';
 import styles from '../index.module.css';
 import { LoaderProps } from '../types';
 import { getObjectTypesUrl, normalizeI3xBaseUrl } from '../services/i3xUrl';
+import { buildI3xRequestHeaders } from '../services/auth';
 
-const Loader: React.FC<LoaderProps> = ({ context, setApiData, setApiUrl }) => {
+const Loader: React.FC<LoaderProps> = ({ context, setApiData, setConnection }) => {
     const studioPro = getStudioProApi(context);
     const messageApi = studioPro.ui.messageBoxes;
     const [url, setUrl] = useState('https://i3x.cesmii.net/i3x/');
     const [loading, setLoading] = useState(false);
+    const [authMode, setAuthMode] = useState<'none' | 'basic' | 'token'>('none');
+    const [username, setUsername] = useState('');
+    const [password, setPassword] = useState('');
+    const [token, setToken] = useState('');
+    const [tokenHeaderMode, setTokenHeaderMode] = useState<'bearer' | 'custom'>('bearer');
+    const [customHeaderName, setCustomHeaderName] = useState('x-api-key');
+    const [customPrefix, setCustomPrefix] = useState('');
+
+    const normalizedPreview = normalizeI3xBaseUrl(url);
+
+    const resolveAuth = () => {
+        if (authMode === 'none') {
+            return { mode: 'none' as const };
+        }
+
+        if (authMode === 'basic') {
+            return {
+                mode: 'basic' as const,
+                username: username.trim(),
+                password,
+            };
+        }
+
+        return {
+            mode: 'token' as const,
+            token: token.trim(),
+            headerName: tokenHeaderMode === 'bearer' ? 'Authorization' : customHeaderName.trim(),
+            prefix: tokenHeaderMode === 'bearer' ? 'Bearer' : customPrefix.trim(),
+        };
+    };
 
     const handleLoad = async () => {
-        const normalizedBaseUrl = normalizeI3xBaseUrl(url);
+        const normalizedBaseUrl = normalizedPreview;
         if (!normalizedBaseUrl) {
             await messageApi.show('error', `Invalid URL: "${url}". Please enter a valid i3X endpoint.`);
             return;
         }
+
+        if (authMode === 'basic' && (!username.trim() || !password)) {
+            await messageApi.show('error', 'Basic authentication requires both username and password.');
+            return;
+        }
+
+        if (authMode === 'token' && !token.trim()) {
+            await messageApi.show('error', 'Token authentication requires a token value.');
+            return;
+        }
+
+        if (authMode === 'token' && tokenHeaderMode === 'custom' && !customHeaderName.trim()) {
+            await messageApi.show('error', 'Token authentication with custom header requires a header name.');
+            return;
+        }
+
+        const auth = resolveAuth();
 
         const objectTypesUrl = getObjectTypesUrl(normalizedBaseUrl);
         if (!objectTypesUrl) {
@@ -26,14 +74,17 @@ const Loader: React.FC<LoaderProps> = ({ context, setApiData, setApiUrl }) => {
         setLoading(true);
         try {
             const proxy = await studioPro.network.httpProxy.getProxyUrl(objectTypesUrl);
-            const response = await fetch(proxy, { headers: { 'accept': 'application/json' } });
+            const response = await fetch(proxy, { headers: buildI3xRequestHeaders(auth) });
             if (!response.ok) {
                 await messageApi.show('error', `Request failed with status ${response.status}.`);
                 return;
             }
             const data = await response.json();
             setUrl(normalizedBaseUrl);
-            setApiUrl(normalizedBaseUrl);
+            setConnection({
+                apiBaseUrl: normalizedBaseUrl,
+                auth,
+            });
             setApiData(data);
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
@@ -48,19 +99,128 @@ const Loader: React.FC<LoaderProps> = ({ context, setApiData, setApiUrl }) => {
     };
 
     return (
-        <div className={styles.loaderContainer}>
-            <input
-                className={styles.loaderInput}
-                type="text"
-                value={url}
-                placeholder="Enter i3X base URL, e.g. https://i3x.cesmii.net/i3x/"
-                onChange={(e) => setUrl(e.target.value)}
-                onKeyDown={handleKeyDown}
-                disabled={loading}
-            />
-            <button className={styles.loaderButton} onClick={handleLoad} disabled={loading}>
-                {loading ? 'Loading…' : 'Load'}
-            </button>
+        <div className={styles.loaderPanel}>
+            <div className={styles.loaderContainer}>
+                <input
+                    className={styles.loaderInput}
+                    type="text"
+                    value={url}
+                    placeholder="Enter i3X base URL, e.g. https://i3x.cesmii.net/i3x/"
+                    onChange={(e) => setUrl(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    disabled={loading}
+                />
+                <button className={styles.loaderButton} onClick={handleLoad} disabled={loading}>
+                    {loading ? 'Loading…' : 'Load'}
+                </button>
+            </div>
+
+            <div className={styles.endpointHint}>
+                <span className={styles.endpointHintLabel}>Normalized base</span>
+                <span className={styles.endpointHintValue}>{normalizedPreview ?? 'Invalid URL'}</span>
+            </div>
+
+            <div className={styles.authCard}>
+                <div className={styles.authHeader}>Authentication</div>
+                <div className={styles.authModeRow}>
+                    <button
+                        type="button"
+                        className={`${styles.authModeBtn} ${authMode === 'none' ? styles.authModeBtnActive : ''}`}
+                        onClick={() => setAuthMode('none')}
+                        disabled={loading}
+                    >
+                        None
+                    </button>
+                    <button
+                        type="button"
+                        className={`${styles.authModeBtn} ${authMode === 'basic' ? styles.authModeBtnActive : ''}`}
+                        onClick={() => setAuthMode('basic')}
+                        disabled={loading}
+                    >
+                        Username/Password
+                    </button>
+                    <button
+                        type="button"
+                        className={`${styles.authModeBtn} ${authMode === 'token' ? styles.authModeBtnActive : ''}`}
+                        onClick={() => setAuthMode('token')}
+                        disabled={loading}
+                    >
+                        Token
+                    </button>
+                </div>
+
+                {authMode === 'basic' && (
+                    <div className={styles.authFieldsGrid}>
+                        <input
+                            className={styles.loaderInput}
+                            type="text"
+                            value={username}
+                            placeholder="Username"
+                            onChange={(e) => setUsername(e.target.value)}
+                            disabled={loading}
+                        />
+                        <input
+                            className={styles.loaderInput}
+                            type="password"
+                            value={password}
+                            placeholder="Password"
+                            onChange={(e) => setPassword(e.target.value)}
+                            disabled={loading}
+                        />
+                    </div>
+                )}
+
+                {authMode === 'token' && (
+                    <div className={styles.authFieldsStack}>
+                        <div className={styles.authModeRow}>
+                            <button
+                                type="button"
+                                className={`${styles.authModeBtn} ${tokenHeaderMode === 'bearer' ? styles.authModeBtnActive : ''}`}
+                                onClick={() => setTokenHeaderMode('bearer')}
+                                disabled={loading}
+                            >
+                                Bearer
+                            </button>
+                            <button
+                                type="button"
+                                className={`${styles.authModeBtn} ${tokenHeaderMode === 'custom' ? styles.authModeBtnActive : ''}`}
+                                onClick={() => setTokenHeaderMode('custom')}
+                                disabled={loading}
+                            >
+                                Custom Header
+                            </button>
+                        </div>
+                        {tokenHeaderMode === 'custom' && (
+                            <div className={styles.authFieldsGrid}>
+                                <input
+                                    className={styles.loaderInput}
+                                    type="text"
+                                    value={customHeaderName}
+                                    placeholder="Header name (e.g. x-api-key)"
+                                    onChange={(e) => setCustomHeaderName(e.target.value)}
+                                    disabled={loading}
+                                />
+                                <input
+                                    className={styles.loaderInput}
+                                    type="text"
+                                    value={customPrefix}
+                                    placeholder="Prefix (optional)"
+                                    onChange={(e) => setCustomPrefix(e.target.value)}
+                                    disabled={loading}
+                                />
+                            </div>
+                        )}
+                        <input
+                            className={styles.loaderInput}
+                            type="password"
+                            value={token}
+                            placeholder={tokenHeaderMode === 'bearer' ? 'Bearer token' : 'Token value'}
+                            onChange={(e) => setToken(e.target.value)}
+                            disabled={loading}
+                        />
+                    </div>
+                )}
+            </div>
         </div>
     );
 };

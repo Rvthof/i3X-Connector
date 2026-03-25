@@ -1,13 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { ComponentContext, getStudioProApi } from '@mendix/extensions-api';
 import styles from '../index.module.css';
-import { ObjectType, AnyProperty, isGroupProperty, isArrayProperty, extractArrayItemProperties } from '../types';
+import { ObjectType, AnyProperty, ConnectionConfig, isGroupProperty, isArrayProperty, extractArrayItemProperties } from '../types';
 import { createQueryValuesMicroflow } from '../services/studioProService';
 import { getObjectsUrl } from '../services/i3xUrl';
+import { buildI3xRequestHeaders } from '../services/auth';
 
 interface Props {
     context: ComponentContext;
-    apiUrl: string;
+    connection: ConnectionConfig;
     item: ObjectType;
     onClose: () => void;
     onImplement: (item: ObjectType) => Promise<void>;
@@ -194,7 +195,7 @@ function flattenObjectToColumns(
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
-const DetailPanel: React.FC<Props> = ({ context, apiUrl, item, onClose, onImplement }) => {
+const DetailPanel: React.FC<Props> = ({ context, connection, item, onClose, onImplement }) => {
     const studioPro = getStudioProApi(context);
     const [isImplementing, setIsImplementing] = useState(false);
     const [activeTab, setActiveTab] = useState<'attributes' | 'objects'>('attributes');
@@ -244,7 +245,7 @@ const DetailPanel: React.FC<Props> = ({ context, apiUrl, item, onClose, onImplem
         }
     };
 
-    const buildObjectsUrl = (): string | null => getObjectsUrl(apiUrl, item.elementId);
+    const buildObjectsUrl = (): string | null => getObjectsUrl(connection.apiBaseUrl, item.elementId);
 
     useEffect(() => {
         let cancelled = false;
@@ -258,7 +259,7 @@ const DetailPanel: React.FC<Props> = ({ context, apiUrl, item, onClose, onImplem
             const objectsUrl = buildObjectsUrl();
             if (!objectsUrl) {
                 if (!cancelled) {
-                    setObjectsLoadError(`Cannot build objects URL from '${apiUrl}'.`);
+                    setObjectsLoadError(`Cannot build objects URL from '${connection.apiBaseUrl}'.`);
                     setIsLoadingObjects(false);
                 }
                 return;
@@ -266,7 +267,7 @@ const DetailPanel: React.FC<Props> = ({ context, apiUrl, item, onClose, onImplem
 
             try {
                 const proxy = await studioPro.network.httpProxy.getProxyUrl(objectsUrl);
-                const response = await fetch(proxy, { headers: { accept: 'application/json' } });
+                const response = await fetch(proxy, { headers: buildI3xRequestHeaders(connection.auth) });
                 if (!response.ok) {
                     if (!cancelled) {
                         setObjectsLoadError(`Status: ${response.status}`);
@@ -297,7 +298,7 @@ const DetailPanel: React.FC<Props> = ({ context, apiUrl, item, onClose, onImplem
         return () => {
             cancelled = true;
         };
-    }, [apiUrl, item.elementId, studioPro.network.httpProxy]);
+    }, [connection, item.elementId, studioPro.network.httpProxy]);
 
     const handleCreateValueQuery = async () => {
         if (selectedObjectIndex === null || isCreatingQuery) return;
@@ -328,7 +329,7 @@ const DetailPanel: React.FC<Props> = ({ context, apiUrl, item, onClose, onImplem
             const result = await createQueryValuesMicroflow(
                 item,
                 { elementId: elementIdValue, displayName: displayNameValue },
-                apiUrl,
+                connection,
                 'i3X_Connector'
             );
             await studioPro.ui.notifications.show({

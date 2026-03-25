@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { IComponent, getStudioProApi } from "@mendix/extensions-api";
 import { Loader, List, DetailPanel } from "./components/_components";
 import { initStudioPro, implementObjectAsEntity } from "./services/studioProService";
-import { ObjectType } from "./types";
+import { ConnectionConfig, ObjectType } from "./types";
 import styles from "./index.module.css";
 import "./index.module.css";
 
@@ -17,7 +17,7 @@ export const component: IComponent = {
 
         const AppContent = () => {
             const [apiData, setApiData] = useState<unknown>(null);
-            const [apiUrl, setApiUrl] = useState("");
+            const [connection, setConnection] = useState<ConnectionConfig | null>(null);
             const [selectedItem, setSelectedItem] = useState<ObjectType | null>(null);
 
             useEffect(() => {
@@ -39,7 +39,16 @@ export const component: IComponent = {
 
             const handleImplement = async (item: ObjectType) => {
                 try {
-                    const result = await implementObjectAsEntity(item, apiUrl, "i3X_Connector");
+                    if (!connection) {
+                        await studioPro.ui.messageBoxes.show(
+                            "warning",
+                            "No connection configured",
+                            "Load an i3X endpoint first before implementing entities."
+                        );
+                        return;
+                    }
+
+                    const result = await implementObjectAsEntity(item, connection, "i3X_Connector");
 
                     const somethingCreated =
                         result.baseEntityCreated ||
@@ -106,16 +115,16 @@ export const component: IComponent = {
                         Enter an i3X API endpoint URL below and press <kbd className={styles.kbd}>Enter</kbd> or click <strong>Load</strong> to retrieve object types. Click any row to inspect its schema.
                     </p>
 
-                    <Loader context={componentContext} setApiData={handleDataLoaded} setApiUrl={setApiUrl} />
+                    <Loader context={componentContext} setApiData={handleDataLoaded} setConnection={setConnection} />
                     <List
                         apiData={apiData}
                         selectedId={selectedItem?.elementId ?? null}
                         onSelect={handleSelect}
                     />
-                    {selectedItem && (
+                    {selectedItem && connection && (
                         <DetailPanel
                             context={componentContext}
-                            apiUrl={apiUrl}
+                            connection={connection}
                             item={selectedItem}
                             onClose={() => setSelectedItem(null)}
                             onImplement={handleImplement}
