@@ -42,8 +42,7 @@ const Loader: React.FC<LoaderProps> = ({ context, setApiData, setConnection }) =
     };
 
     const handleLoad = async () => {
-        const normalizedBaseUrl = normalizedPreview;
-        if (!normalizedBaseUrl) {
+        if (!normalizedPreview) {
             await messageApi.show('error', `Invalid URL: "${url}". Please enter a valid i3X endpoint.`);
             return;
         }
@@ -65,7 +64,7 @@ const Loader: React.FC<LoaderProps> = ({ context, setApiData, setConnection }) =
 
         const auth = resolveAuth();
 
-        const objectTypesUrl = getObjectTypesUrl(normalizedBaseUrl);
+        const objectTypesUrl = getObjectTypesUrl(normalizedPreview);
         if (!objectTypesUrl) {
             await messageApi.show('error', `Cannot build object types URL from "${url}".`);
             return;
@@ -80,9 +79,9 @@ const Loader: React.FC<LoaderProps> = ({ context, setApiData, setConnection }) =
                 return;
             }
             const data = await response.json();
-            setUrl(normalizedBaseUrl);
+            setUrl(normalizedPreview);
             setConnection({
-                apiBaseUrl: normalizedBaseUrl,
+                apiBaseUrl: normalizedPreview,
                 auth,
             });
             setApiData(data);

@@ -11,9 +11,9 @@ export interface LeafProperty {
 export interface GroupProperty {
     type: 'object';
     properties: Record<string, LeafProperty>;
-    required: string[];
-    additionalProperties: boolean;
-    $defs: Record<string, unknown>;
+    required?: string[];
+    additionalProperties?: boolean;
+    $defs?: Record<string, unknown>;
 }
 
 export interface ArrayProperty {
@@ -81,7 +81,6 @@ export function extractArrayItemProperties(
 export function isObjectTypeArray(value: unknown): value is ObjectType[] {
     return (
         Array.isArray(value) &&
-        value.length > 0 &&
         value.every(
             (item) =>
                 typeof item === 'object' &&

@@ -2,10 +2,7 @@ import type { Microflows } from '@mendix/extensions-api';
 import type { AuthConfig } from '../types';
 
 function toBase64(value: string): string {
-    if (typeof btoa === 'function') {
-        return btoa(value);
-    }
-    return Buffer.from(value, 'utf-8').toString('base64');
+    return btoa(value);
 }
 
 function buildAuthHeaderValue(auth: AuthConfig): { key: string; value: string } | null {
@@ -51,11 +48,7 @@ export async function applyAuthToHttpConfiguration(
         return;
     }
 
-    const authHeader = buildAuthHeaderValue(auth);
-    if (!authHeader) {
-        return;
-    }
-
+    const authHeader = buildAuthHeaderValue(auth)!;
     const header = await httpConfiguration.addHttpHeaderEntry();
     header.key = authHeader.key;
     header.value = authHeader.value;
