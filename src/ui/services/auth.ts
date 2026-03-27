@@ -3,10 +3,7 @@ import type { StudioProApi } from '@mendix/extensions-api';
 import type { Microflows } from '@mendix/extensions-api';
 
 function toBase64(value: string): string {
-    if (typeof btoa === 'function') {
-        return btoa(value);
-    }
-    return Buffer.from(value, 'utf-8').toString('base64');
+    return btoa(value);
 }
 
 function buildAuthHeaderValue(auth: AuthConfig): { key: string; value: string } | null {

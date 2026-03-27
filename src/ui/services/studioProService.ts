@@ -2,7 +2,7 @@ import type { StudioProApi } from '@mendix/extensions-api';
 import type { DomainModels } from '@mendix/extensions-api';
 import type { Microflows } from '@mendix/extensions-api';
 import type { Texts } from '@mendix/extensions-api';
-import { isGroupProperty, isArrayProperty, extractArrayItemProperties, type ConnectionConfig, type LeafProperty, type ObjectType } from '../types';
+import { isGroupProperty, isArrayProperty, extractArrayItemProperties, type ArrayProperty, type ConnectionConfig, type LeafProperty, type ObjectType } from '../types';
 import { getObjectsUrl, getObjectsValueUrl } from './i3xUrl';
 import { buildI3xRequestHeaders, configureHttpAuthForMicroflow } from './auth';
 
@@ -42,6 +42,17 @@ type MendixAttributeType = NonNullable<DomainModels.AttributeCreationOptions['ty
 const MENDIX_LONG_MIN = Number('-9223372036854775808');
 const MENDIX_LONG_MAX = Number('9223372036854775807');
 
+// ── Layout constants ──────────────────────────────────────────────────────────
+const ATTR_ROW_H  = 20;   // px per attribute row
+const ENTITY_HDR_H = 30;  // px for entity header
+const H_GAP        = 80;  // horizontal gap between base and group column
+const V_GAP        = 40;  // vertical gap between group entities
+const BASE_WIDTH   = 200; // base entity column width
+
+function entityHeight(attrCount: number): number {
+    return ENTITY_HDR_H + Math.max(1, attrCount) * ATTR_ROW_H;
+}
+
 function toModelName(raw: string): string {
     const compact = raw.trim().replace(/[^A-Za-z0-9_]/g, '_').replace(/_+/g, '_');
     const startsWithLetter = /^[A-Za-z]/.test(compact) ? compact : `N_${compact}`;
@@ -75,15 +86,9 @@ function getAttributeType(property: LeafProperty): MendixAttributeType | undefin
 }
 
 function clampToMendixLong(value: number): number {
-    if (!Number.isFinite(value)) {
-        return value;
-    }
-    if (value < MENDIX_LONG_MIN) {
-        return MENDIX_LONG_MIN;
-    }
-    if (value > MENDIX_LONG_MAX) {
-        return MENDIX_LONG_MAX;
-    }
+    if (!Number.isFinite(value)) return value;
+    if (value < MENDIX_LONG_MIN) return MENDIX_LONG_MIN;
+    if (value > MENDIX_LONG_MAX) return MENDIX_LONG_MAX;
     return value;
 }
 
@@ -180,23 +185,27 @@ async function createMessageActivity(
     return messageActivity;
 }
 
-async function ensureMicroflowForObject(
-    sp: StudioProApi,
-    moduleId: string,
-    moduleName: string,
-    microflowName: string,
-    objectsUrl: string,
-    connection: ConnectionConfig
-): Promise<boolean> {
-    const existingMicroflows = await sp.app.model.microflows.loadAll(
-        unitInfo => unitInfo.moduleName === moduleName && unitInfo.name === microflowName,
-        1
-    );
-    if (existingMicroflows.length > 0) {
-        return false;
-    }
+// ── Shared microflow builder ──────────────────────────────────────────────────
 
-    const microflow = await sp.app.model.microflows.addMicroflow(moduleId, { name: microflowName });
+interface RestMicroflowOptions {
+    url: string;
+    requestBody: string;
+    extraHeaders?: Array<{ key: string; value: string }>;
+    connection: ConnectionConfig;
+}
+
+/**
+ * Populates a freshly created microflow with a REST call → status-code split →
+ * success/error message pattern. Both the object-list and value-query microflows
+ * share this structure; they differ only in request body and extra headers.
+ */
+async function populateMicroflowWithRestCall(
+    sp: StudioProApi,
+    microflow: Microflows.Microflow,
+    options: RestMicroflowOptions
+): Promise<void> {
+    const { url, requestBody, extraHeaders = [], connection } = options;
+
     const actionActivity = (await sp.app.model.microflows.createElement(
         'Microflows$ActionActivity'
     )) as Microflows.ActionActivity;
@@ -223,14 +232,14 @@ async function ensureMicroflowForObject(
     )) as Microflows.ResultHandling;
     const stringType = await sp.app.model.microflows.createElement('DataTypes$StringType');
 
-    requestTemplate.text = '';
+    requestTemplate.text = requestBody;
     requestHandler.template = requestTemplate;
     restCall.requestHandling = requestHandler;
     restCall.requestHandlingType = 'Custom';
 
     httpConfiguration.overrideLocation = true;
     locationTemplate.text = '{1}';
-    locationTemplateArg.expression = `'${objectsUrl}'`;
+    locationTemplateArg.expression = `'${url}'`;
     locationTemplate.arguments = [locationTemplateArg];
     httpConfiguration.customLocationTemplate = locationTemplate;
     await configureHttpAuthForMicroflow(sp, httpConfiguration, connection.auth);
@@ -301,9 +310,229 @@ async function ensureMicroflowForObject(
     errorEndEvent.relativeMiddlePoint = { x: 900, y: 300 };
     microflow.objectCollection.objects.push(errorEndEvent);
     microflow.flows.push(await createSequenceFlow(sp, errorActivity.$ID, errorEndEvent.$ID));
+}
 
+// ── Domain model helpers ──────────────────────────────────────────────────────
+
+interface DomainModelResult {
+    baseEntityName: string;
+    baseEntityCreated: boolean;
+    groupEntitiesCreated: number;
+    attributesCreated: number;
+    associationsCreated: number;
+}
+
+async function buildDomainModelEntities(
+    sp: StudioProApi,
+    selectedObject: ObjectType,
+    moduleName: string
+): Promise<DomainModelResult> {
+    const baseEntityName = toModelName(selectedObject.displayName);
+    if (!baseEntityName) {
+        throw new Error('Selected object has no valid name.');
+    }
+
+    const domainModel = await sp.app.model.domainModels.getDomainModel(moduleName);
+    if (!domainModel) {
+        throw new Error(`Module '${moduleName}' was not found or has no domain model.`);
+    }
+
+    const allProperties = selectedObject.schema.properties ?? {};
+
+    const groupEntryList = Object.entries(allProperties).filter(([, p]) =>
+        isGroupProperty(p) || (isArrayProperty(p) && extractArrayItemProperties(p) !== null)
+    );
+    const leafCount = Object.entries(allProperties).filter(
+        ([, p]) => !isGroupProperty(p) && !isArrayProperty(p)
+    ).length;
+    const baseHeight = entityHeight(leafCount);
+
+    // Place new entities below any existing ones to avoid overlap.
+    let startY = 0;
+    for (const ent of domainModel.entities) {
+        const bottom = ent.location.y + ENTITY_HDR_H + ATTR_ROW_H + V_GAP;
+        if (bottom > startY) startY = bottom;
+    }
+
+    // Centre the base entity vertically against the group column.
+    const groupColumnHeight = groupEntryList.reduce((sum, [, p]) => {
+        const attrCount = isGroupProperty(p)
+            ? Object.keys(p.properties ?? {}).length
+            : Object.keys(extractArrayItemProperties(p as never) ?? {}).length;
+        return sum + entityHeight(attrCount) + V_GAP;
+    }, -V_GAP);
+    const baseY = startY + Math.max(0, (groupColumnHeight - baseHeight) / 2);
+
+    let baseEntityCreated = false;
+    if (!domainModel.getEntity(baseEntityName)) {
+        await domainModel.addEntity({ name: baseEntityName });
+        baseEntityCreated = true;
+    }
+
+    const baseEntityObj = domainModel.getEntity(baseEntityName);
+    if (baseEntityObj && baseEntityCreated) {
+        baseEntityObj.location = { x: 0, y: baseY };
+    }
+
+    let groupEntitiesCreated = 0;
+    let attributesCreated = 0;
+    let associationsCreated = 0;
+
+    // ── Group properties → associated entities ────────────────────────────────
+    for (const [groupIndex, [propertyName, property]] of groupEntryList.entries()) {
+        const isResolvableArray = isArrayProperty(property);
+        const preferredGroupEntityName = `${baseEntityName}_${propertyName}`;
+        const groupEntityInfo = getOrCreateEntityName(domainModel, preferredGroupEntityName);
+
+        if (groupEntityInfo.created) {
+            await domainModel.addEntity({ name: groupEntityInfo.name });
+            groupEntitiesCreated += 1;
+        }
+
+        const groupEntity = domainModel.getEntity(groupEntityInfo.name);
+        if (!groupEntity) {
+            throw new Error(`Failed to access generated entity '${groupEntityInfo.name}'.`);
+        }
+
+        if (groupEntityInfo.created) {
+            let groupY = startY;
+            for (let i = 0; i < groupIndex; i++) {
+                const [, prevProp] = groupEntryList[i];
+                const prevAttrCount = isGroupProperty(prevProp)
+                    ? Object.keys((prevProp as { properties?: Record<string, unknown> }).properties ?? {}).length
+                    : Object.keys(extractArrayItemProperties(prevProp as ArrayProperty) ?? {}).length;
+                groupY += entityHeight(prevAttrCount) + V_GAP;
+            }
+            groupEntity.location = { x: BASE_WIDTH + H_GAP, y: groupY };
+        }
+
+        const assocName = `${baseEntityName}_${groupEntityInfo.name}`;
+        if (!domainModel.getAssociation(assocName)) {
+            const baseEntity = domainModel.getEntity(baseEntityName);
+            if (baseEntity) {
+                await domainModel.addAssociation({
+                    name: assocName,
+                    parentEntity: baseEntity.$ID,
+                    childEntity: groupEntity.$ID,
+                    multiplicity: isResolvableArray ? 'many_to_many' : 'one_to_many',
+                });
+                associationsCreated += 1;
+            }
+        }
+
+        const leafProperties = isGroupProperty(property)
+            ? property.properties
+            : (extractArrayItemProperties(property as ArrayProperty) ?? {});
+
+        for (const [leafName, leafProperty] of Object.entries(leafProperties)) {
+            const attributeName = toModelName(leafName);
+            if (groupEntity.getAttribute(attributeName)) continue;
+
+            const attributeType = getAttributeType(leafProperty);
+            await groupEntity.addAttribute({
+                name: attributeName,
+                ...(attributeType ? { type: attributeType } : {}),
+            });
+            attributesCreated += 1;
+        }
+    }
+
+    // ── Leaf properties → attributes on base entity ───────────────────────────
+    for (const [propertyName, property] of Object.entries(allProperties)) {
+        if (isGroupProperty(property) || isArrayProperty(property)) continue;
+
+        const baseEntity = domainModel.getEntity(baseEntityName);
+        if (!baseEntity) {
+            throw new Error(`Failed to access base entity '${baseEntityName}'.`);
+        }
+
+        const attributeName = toModelName(propertyName);
+        if (baseEntity.getAttribute(attributeName)) continue;
+
+        const attributeType = getAttributeType(property);
+        await baseEntity.addAttribute({
+            name: attributeName,
+            ...(attributeType ? { type: attributeType } : {}),
+        });
+        attributesCreated += 1;
+    }
+
+    await sp.app.model.domainModels.save(domainModel);
+
+    return { baseEntityName, baseEntityCreated, groupEntitiesCreated, attributesCreated, associationsCreated };
+}
+
+async function createOrUpdateJsonStructure(
+    sp: StudioProApi,
+    moduleId: string,
+    moduleName: string,
+    structureName: string,
+    jsonSnippet: string
+): Promise<boolean> {
+    const existingStructures = await sp.app.model.jsonStructures.getUnitsInfo();
+    const existingInfo = existingStructures.find(
+        u => u.moduleName === moduleName && u.name === structureName
+    );
+
+    if (existingInfo) {
+        const loaded = await sp.app.model.jsonStructures.loadAll(u => u.$ID === existingInfo.$ID);
+        if (loaded.length > 0) {
+            loaded[0].jsonSnippet = jsonSnippet;
+            await sp.app.model.jsonStructures.save(loaded[0]);
+        }
+        return false;
+    }
+
+    await sp.app.model.jsonStructures.addJsonStructure(moduleId, { name: structureName, jsonSnippet });
+    return true;
+}
+
+async function createOrUpdateImportMapping(
+    sp: StudioProApi,
+    moduleId: string,
+    moduleName: string,
+    mappingName: string,
+    jsonStructureQualifiedName: string
+): Promise<boolean> {
+    const existingMappings = await sp.app.model.importMappings.getUnitsInfo();
+    const alreadyExists = existingMappings.some(
+        u => u.moduleName === moduleName && u.name === mappingName
+    );
+
+    if (alreadyExists) return false;
+
+    await sp.app.model.importMappings.addImportMapping(moduleId, {
+        name: mappingName,
+        selectStructure: {
+            structureType: 'jsonStructure',
+            structureQualifiedName: jsonStructureQualifiedName,
+            mapElements: { mappingType: 'automatic' },
+        },
+    });
+    return true;
+}
+
+async function ensureMicroflowForObject(
+    sp: StudioProApi,
+    moduleId: string,
+    moduleName: string,
+    microflowName: string,
+    objectsUrl: string,
+    connection: ConnectionConfig
+): Promise<boolean> {
+    const existingMicroflows = await sp.app.model.microflows.loadAll(
+        unitInfo => unitInfo.moduleName === moduleName && unitInfo.name === microflowName,
+        1
+    );
+    if (existingMicroflows.length > 0) return false;
+
+    const microflow = await sp.app.model.microflows.addMicroflow(moduleId, { name: microflowName });
+    await populateMicroflowWithRestCall(sp, microflow, {
+        url: objectsUrl,
+        requestBody: '',
+        connection,
+    });
     await sp.app.model.microflows.save(microflow);
-
     return true;
 }
 
@@ -473,199 +702,30 @@ export async function implementObjectAsEntity(
     moduleName = 'i3X_Connector'
 ): Promise<ImplementEntityResult> {
     const sp = getStudioPro();
-    const baseEntityName = toModelName(selectedObject.displayName);
 
-    if (!baseEntityName) {
-        throw new Error('Selected object has no valid name.');
-    }
+    const {
+        baseEntityName,
+        baseEntityCreated,
+        groupEntitiesCreated,
+        attributesCreated,
+        associationsCreated,
+    } = await buildDomainModelEntities(sp, selectedObject, moduleName);
 
-    const domainModel = await sp.app.model.domainModels.getDomainModel(moduleName);
-    if (!domainModel) {
-        throw new Error(`Module '${moduleName}' was not found or has no domain model.`);
-    }
-
-    // ── Layout constants ─────────────────────────────────────────────────────
-    // Base entity sits on the left; group entities fan out in a column to the right.
-    // Heights grow with attribute count: header (~30px) + ~20px per attribute.
-    const ATTR_ROW_H    = 20;    // px per attribute row
-    const ENTITY_HDR_H  = 30;    // px for entity header
-    const H_GAP         = 80;    // horizontal gap between base and group column
-    const V_GAP         = 40;    // vertical gap between group entities
-    const BASE_WIDTH    = 200;   // base entity column width
-
-    function entityHeight(attrCount: number): number {
-        return ENTITY_HDR_H + Math.max(1, attrCount) * ATTR_ROW_H;
-    }
-
-    // Count attributes per entity upfront so we can compute layout before creation.
-    const allProperties = selectedObject.schema.properties ?? {};
-
-    // Both object-type groups and array-type groups become associated entities.
-    const groupEntryList = Object.entries(allProperties).filter(([, p]) =>
-        isGroupProperty(p) || (isArrayProperty(p) && extractArrayItemProperties(p) !== null)
-    );
-    const leafCount = Object.entries(allProperties).filter(
-        ([, p]) => !isGroupProperty(p) && !isArrayProperty(p)
-    ).length;
-    const baseHeight = entityHeight(leafCount);
-
-    // Pick a starting Y below the lowest existing entity to avoid overlap.
-    let startY = 0;
-    for (const ent of domainModel.entities) {
-        const bottom = ent.location.y + ENTITY_HDR_H + ATTR_ROW_H + V_GAP;
-        if (bottom > startY) startY = bottom;
-    }
-
-    // Centre the base entity vertically against the group column.
-    const groupColumnHeight = groupEntryList.reduce((sum, [, p]) => {
-        const attrCount = isGroupProperty(p)
-            ? Object.keys(p.properties ?? {}).length
-            : Object.keys(extractArrayItemProperties(p as never) ?? {}).length;
-        return sum + entityHeight(attrCount) + V_GAP;
-    }, -V_GAP); // subtract one trailing gap
-    const baseY = startY + Math.max(0, (groupColumnHeight - baseHeight) / 2);
-
-    let baseEntityCreated = false;
-    if (!domainModel.getEntity(baseEntityName)) {
-        await domainModel.addEntity({ name: baseEntityName });
-        baseEntityCreated = true;
-    }
-
-    // Position the base entity.
-    const baseEntityObj = domainModel.getEntity(baseEntityName);
-    if (baseEntityObj && baseEntityCreated) {
-        baseEntityObj.location = { x: 0, y: baseY };
-    }
-
-    const properties = selectedObject.schema.properties ?? {};
-    let groupEntitiesCreated = 0;
-    let attributesCreated = 0;
-    let associationsCreated = 0;
-    let groupIndex = 0;
-
-    for (const [propertyName, property] of Object.entries(properties)) {
-        const isResolvableArray = isArrayProperty(property) && extractArrayItemProperties(property) !== null;
-        if (isGroupProperty(property) || isResolvableArray) {
-            const preferredGroupEntityName = `${baseEntityName}_${propertyName}`;
-            const groupEntityInfo = getOrCreateEntityName(domainModel, preferredGroupEntityName);
-
-            if (groupEntityInfo.created) {
-                await domainModel.addEntity({ name: groupEntityInfo.name });
-                groupEntitiesCreated += 1;
-            }
-
-            const groupEntity = domainModel.getEntity(groupEntityInfo.name);
-            if (!groupEntity) {
-                throw new Error(`Failed to access generated entity '${groupEntityInfo.name}'.`);
-            }
-
-            // Position new group entity to the right of the base entity.
-            if (groupEntityInfo.created) {
-                // Compute Y by summing heights of all preceding group entities.
-                let groupY = startY;
-                for (let i = 0; i < groupIndex; i++) {
-                    const [, prevProp] = groupEntryList[i];
-                    const prevAttrCount = isGroupProperty(prevProp)
-                        ? Object.keys((prevProp as { properties?: Record<string, unknown> }).properties ?? {}).length
-                        : Object.keys(extractArrayItemProperties(prevProp as never) ?? {}).length;
-                    groupY += entityHeight(prevAttrCount) + V_GAP;
-                }
-                groupEntity.location = { x: BASE_WIDTH + H_GAP, y: groupY };
-            }
-            groupIndex += 1;
-
-            // Arrays get many-to-many (a list of items); objects get one-to-many.
-            const isArray = isArrayProperty(property);
-            const assocName = `${baseEntityName}_${groupEntityInfo.name}`;
-            if (!domainModel.getAssociation(assocName)) {
-                const baseEntity = domainModel.getEntity(baseEntityName);
-                if (baseEntity) {
-                    await domainModel.addAssociation({
-                        name: assocName,
-                        parentEntity: baseEntity.$ID,
-                        childEntity: groupEntity.$ID,
-                        multiplicity: isArray ? 'many_to_many' : 'one_to_many',
-                    });
-                    associationsCreated += 1;
-                }
-            }
-
-            // Resolve the leaf properties to add as attributes.
-            const leafProperties = isGroupProperty(property)
-                ? property.properties
-                : (extractArrayItemProperties(property) ?? {});
-
-            for (const [leafName, leafProperty] of Object.entries(leafProperties)) {
-                const attributeName = toModelName(leafName);
-                if (groupEntity.getAttribute(attributeName)) {
-                    continue;
-                }
-
-                const attributeType = getAttributeType(leafProperty);
-                const attributeOptions: DomainModels.AttributeCreationOptions = {
-                    name: attributeName,
-                    ...(attributeType ? { type: attributeType } : {}),
-                };
-
-                await groupEntity.addAttribute(attributeOptions);
-                attributesCreated += 1;
-            }
-            continue;
-        }
-
-        // Skip array properties with no resolvable item schema — nothing to map.
-        if (isArrayProperty(property)) {
-            continue;
-        }
-
-        const baseEntity = domainModel.getEntity(baseEntityName);
-        if (!baseEntity) {
-            throw new Error(`Failed to access base entity '${baseEntityName}'.`);
-        }
-
-        const attributeName = toModelName(propertyName);
-        if (baseEntity.getAttribute(attributeName)) {
-            continue;
-        }
-
-        const attributeType = getAttributeType(property);
-        const attributeOptions: DomainModels.AttributeCreationOptions = {
-            name: attributeName,
-            ...(attributeType ? { type: attributeType } : {}),
-        };
-
-        await baseEntity.addAttribute(attributeOptions);
-        attributesCreated += 1;
-    }
-
-    await sp.app.model.domainModels.save(domainModel);
-
-    // ── JSON Structure ───────────────────────────────────────────────────────
-    // Fetch /objects?typeId=<elementId> using the user-supplied i3X base URL,
-    // then store the result as the JSON Structure snippet.
     const jsonStructureName = `JSON_${baseEntityName}`;
     const importMappingName = `IM_${baseEntityName}`;
     const microflowName = `MF_${baseEntityName}`;
-    let jsonStructureCreated = false;
-    let importMappingCreated = false;
-    let microflowCreated = false;
 
-    // Derive the objects endpoint from base /i3x/ and append typeId.
     const objectTypeId = selectedObject.elementId.trim();
     const objectsUrl = objectTypeId ? getObjectsUrl(connection.apiBaseUrl, objectTypeId) : null;
 
+    // Fetch live data for the JSON Structure snippet; fall back to the schema.
     let jsonSnippet: string;
     if (objectsUrl) {
         try {
             const proxyUrl = await sp.network.httpProxy.getProxyUrl(objectsUrl);
             const response = await fetch(proxyUrl, { headers: buildI3xRequestHeaders(connection.auth) });
-            if (response.ok) {
-                const data = await response.json();
-                jsonSnippet = JSON.stringify(sanitizeJsonForMendixLimits(data), null, 2);
-            } else {
-                // Fall back to the schema if the objects endpoint fails.
-                jsonSnippet = JSON.stringify(sanitizeJsonForMendixLimits(selectedObject), null, 2);
-            }
+            const data = response.ok ? await response.json() : selectedObject;
+            jsonSnippet = JSON.stringify(sanitizeJsonForMendixLimits(data), null, 2);
         } catch {
             jsonSnippet = JSON.stringify(sanitizeJsonForMendixLimits(selectedObject), null, 2);
         }
@@ -674,61 +734,20 @@ export async function implementObjectAsEntity(
     }
 
     const module = await sp.app.model.projects.getModule(moduleName);
+    let jsonStructureCreated = false;
+    let importMappingCreated = false;
+    let microflowCreated = false;
+
     if (module) {
-        // ── JSON Structure ────────────────────────────────────────────
-        const existingStructures = await sp.app.model.jsonStructures.getUnitsInfo();
-        const existingJsonInfo = existingStructures.find(
-            u => u.moduleName === moduleName && u.name === jsonStructureName
+        jsonStructureCreated = await createOrUpdateJsonStructure(
+            sp, module.$ID, moduleName, jsonStructureName, jsonSnippet
         );
-
-        if (existingJsonInfo) {
-            // Already exists — update the snippet to reflect the latest data.
-            const loaded = await sp.app.model.jsonStructures.loadAll(
-                u => u.$ID === existingJsonInfo.$ID
-            );
-            if (loaded.length > 0) {
-                loaded[0].jsonSnippet = jsonSnippet;
-                await sp.app.model.jsonStructures.save(loaded[0]);
-            }
-        } else {
-            // New — create with the snippet pre-populated.
-            await sp.app.model.jsonStructures.addJsonStructure(
-                module.$ID,
-                { name: jsonStructureName, jsonSnippet }
-            );
-            jsonStructureCreated = true;
-        }
-
-        // ── Import Mapping ────────────────────────────────────────
-        const jsonStructureQualifiedName = `${moduleName}.${jsonStructureName}`;
-        const existingMappings = await sp.app.model.importMappings.getUnitsInfo();
-        const existingMappingInfo = existingMappings.find(
-            u => u.moduleName === moduleName && u.name === importMappingName
+        importMappingCreated = await createOrUpdateImportMapping(
+            sp, module.$ID, moduleName, importMappingName, `${moduleName}.${jsonStructureName}`
         );
-
-        if (!existingMappingInfo) {
-            const mapping = await sp.app.model.importMappings.addImportMapping(
-                module.$ID,
-                {
-                    name: importMappingName,
-                    selectStructure: {
-                        structureType: 'jsonStructure',
-                        structureQualifiedName: jsonStructureQualifiedName,
-                        mapElements: { mappingType: 'automatic' },
-                    },
-                }
-            );
-            importMappingCreated = true;
-        }
-
         if (objectsUrl) {
             microflowCreated = await ensureMicroflowForObject(
-                sp,
-                module.$ID,
-                moduleName,
-                microflowName,
-                objectsUrl,
-                connection
+                sp, module.$ID, moduleName, microflowName, objectsUrl, connection
             );
         }
     }

@@ -1,23 +1,21 @@
-const KNOWN_SUFFIXES = [
-    '/objecttypes',
-    '/objects/value',
-    '/objects/history',
-    '/objects/list',
-    '/objects/related',
-    '/objects',
-] as const;
+const KNOWN_SUFFIX_REGEXES = [
+    /\/objecttypes$/i,
+    /\/objects\/value$/i,
+    /\/objects\/history$/i,
+    /\/objects\/list$/i,
+    /\/objects\/related$/i,
+    /\/objects$/i,
+];
 
 function trimTrailingSlashes(path: string): string {
     return path.replace(/\/+$/, '');
 }
 
 function stripKnownSuffix(path: string): string {
-    let current = trimTrailingSlashes(path);
-    for (const suffix of KNOWN_SUFFIXES) {
-        const suffixRegex = new RegExp(`${suffix.replace('/', '\\/')}$`, 'i');
-        if (suffixRegex.test(current)) {
-            current = current.replace(suffixRegex, '');
-            break;
+    const current = trimTrailingSlashes(path);
+    for (const regex of KNOWN_SUFFIX_REGEXES) {
+        if (regex.test(current)) {
+            return current.replace(regex, '');
         }
     }
     return current;
@@ -25,10 +23,7 @@ function stripKnownSuffix(path: string): string {
 
 function toNormalizedPath(path: string): string {
     const stripped = stripKnownSuffix(path);
-    const withoutTrailing = trimTrailingSlashes(stripped);
-    const withI3x = /\/i3x$/i.test(withoutTrailing)
-        ? withoutTrailing
-        : `${withoutTrailing}/i3x`;
+    const withI3x = /\/i3x$/i.test(stripped) ? stripped : `${stripped}/i3x`;
     return withI3x.replace(/\/{2,}/g, '/') || '/i3x';
 }
 

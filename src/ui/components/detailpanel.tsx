@@ -6,6 +6,10 @@ import { createQueryValuesMicroflow } from '../services/studioProService';
 import { getObjectsUrl } from '../services/i3xUrl';
 import { buildI3xRequestHeaders } from '../services/auth';
 
+function shortNs(uri: string): string {
+    return uri.split('/').filter(Boolean).pop() ?? uri;
+}
+
 interface Props {
     context: ComponentContext;
     connection: ConnectionConfig;
@@ -218,7 +222,6 @@ const DetailPanel: React.FC<Props> = ({ context, connection, item, onClose, onIm
         return acc + 1;
     }, 0);
 
-    const shortNs = (uri: string) => uri.split('/').filter(Boolean).pop() ?? uri;
     const flattenedObjects = useMemo(
         () => retrievedObjects.map(obj => flattenObjectToColumns(obj)),
         [retrievedObjects]
@@ -245,8 +248,6 @@ const DetailPanel: React.FC<Props> = ({ context, connection, item, onClose, onIm
         }
     };
 
-    const buildObjectsUrl = (): string | null => getObjectsUrl(connection.apiBaseUrl, item.elementId);
-
     useEffect(() => {
         let cancelled = false;
 
@@ -256,7 +257,7 @@ const DetailPanel: React.FC<Props> = ({ context, connection, item, onClose, onIm
             setRetrievedObjects([]);
             setSelectedObjectIndex(null);
 
-            const objectsUrl = buildObjectsUrl();
+            const objectsUrl = getObjectsUrl(connection.apiBaseUrl, item.elementId);
             if (!objectsUrl) {
                 if (!cancelled) {
                     setObjectsLoadError(`Cannot build objects URL from '${connection.apiBaseUrl}'.`);
@@ -319,9 +320,10 @@ const DetailPanel: React.FC<Props> = ({ context, connection, item, onClose, onIm
             return;
         }
 
+        const rawDisplayName = findField('displayName');
         const displayNameValue =
-            typeof findField('displayName') === 'string' && (findField('displayName') as string).trim()
-                ? (findField('displayName') as string)
+            typeof rawDisplayName === 'string' && rawDisplayName.trim()
+                ? rawDisplayName
                 : elementIdValue;
 
         setIsCreatingQuery(true);
@@ -424,12 +426,11 @@ const DetailPanel: React.FC<Props> = ({ context, connection, item, onClose, onIm
                             <table className={styles.pipelineTable}>
                                 <thead>
                                     <tr className={styles.tableHeader}>
-                                        <th className={styles.tableHeaderCell} style={{ width: 44, minWidth: 44 }}>#</th>
+                                        <th className={`${styles.tableHeaderCell} ${styles.rowNumberCell}`}>#</th>
                                         {objectColumns.map(column => (
                                             <th
                                                 key={column}
-                                                className={styles.tableHeaderCell}
-                                                style={isElementIdColumn(column) ? { minWidth: 360, width: 360 } : undefined}
+                                                className={`${styles.tableHeaderCell} ${isElementIdColumn(column) ? styles.elementIdCell : ''}`}
                                             >
                                                 {column}
                                             </th>
@@ -443,21 +444,15 @@ const DetailPanel: React.FC<Props> = ({ context, connection, item, onClose, onIm
                                             onClick={() => setSelectedObjectIndex(index)}
                                             className={`${styles.tableRow} ${selectedObjectIndex === index ? styles.selected : ''}`}
                                         >
-                                            <td className={styles.tableCell} style={{ width: 44, minWidth: 44 }}>{index + 1}</td>
+                                            <td className={`${styles.tableCell} ${styles.rowNumberCell}`}>{index + 1}</td>
                                             {objectColumns.map(column => {
                                                 const cellValue = obj[column] ?? '—';
                                                 const valueText = String(cellValue);
                                                 return (
                                                     <td
                                                         key={column}
-                                                        className={`${styles.tableCell} ${styles.descCell}`}
+                                                        className={`${styles.tableCell} ${styles.descCell} ${isElementIdColumn(column) ? styles.elementIdCell : ''}`}
                                                         title={valueText}
-                                                        style={{
-                                                            ...(isElementIdColumn(column) ? { minWidth: 360 } : {}),
-                                                            whiteSpace: 'nowrap',
-                                                            overflow: 'hidden',
-                                                            textOverflow: 'ellipsis',
-                                                        }}
                                                     >
                                                         {valueText}
                                                     </td>

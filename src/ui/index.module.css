@@ -366,6 +366,16 @@
     white-space: normal;
 }
 
+.rowNumberCell {
+    width: 44px;
+    min-width: 44px;
+}
+
+.elementIdCell {
+    min-width: 360px;
+    width: 360px;
+}
+
 .idCell {
     font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
     font-size: 12px;
