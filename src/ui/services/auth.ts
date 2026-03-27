@@ -1,5 +1,6 @@
-import type { Microflows } from '@mendix/extensions-api';
 import type { AuthConfig } from '../types';
+import type { StudioProApi } from '@mendix/extensions-api';
+import type { Microflows } from '@mendix/extensions-api';
 
 function toBase64(value: string): string {
     if (typeof btoa === 'function') {
@@ -36,27 +37,28 @@ export function buildI3xRequestHeaders(auth: AuthConfig): Record<string, string>
     return headers;
 }
 
-export async function applyAuthToHttpConfiguration(
+export async function configureHttpAuthForMicroflow(
+    sp: StudioProApi,
     httpConfiguration: Microflows.HttpConfiguration,
     auth: AuthConfig
 ): Promise<void> {
-    if (auth.mode === 'none') {
-        return;
-    }
-
+    // Handle basic auth via httpConfiguration properties
     if (auth.mode === 'basic') {
         httpConfiguration.useAuthentication = true;
-        httpConfiguration.httpAuthenticationUserName = auth.username;
-        httpConfiguration.authenticationPassword = auth.password;
-        return;
+        httpConfiguration.httpAuthenticationUserName = '${BASIC_AUTH_USERNAME}';
+        httpConfiguration.authenticationPassword = '${BASIC_AUTH_PASSWORD}';
     }
 
-    const authHeader = buildAuthHeaderValue(auth);
-    if (!authHeader) {
-        return;
+    // Handle token-based auth via headers
+    if (auth.mode !== 'none' && auth.mode !== 'basic') {
+        const headerName = auth.headerName.trim() || 'Authorization';
+        const authHeader = (await sp.app.model.microflows.createElement(
+            'Microflows$HttpHeaderEntry'
+        )) as Microflows.HttpHeaderEntry;
+        authHeader.key = headerName;
+        authHeader.value = '${AUTH_TOKEN}';
+        httpConfiguration.headerEntries.push(authHeader);
     }
-
-    const header = await httpConfiguration.addHttpHeaderEntry();
-    header.key = authHeader.key;
-    header.value = authHeader.value;
 }
+
+

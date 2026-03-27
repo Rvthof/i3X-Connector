@@ -4,7 +4,7 @@ import type { Microflows } from '@mendix/extensions-api';
 import type { Texts } from '@mendix/extensions-api';
 import { isGroupProperty, isArrayProperty, extractArrayItemProperties, type ConnectionConfig, type LeafProperty, type ObjectType } from '../types';
 import { getObjectsUrl, getObjectsValueUrl } from './i3xUrl';
-import { applyAuthToHttpConfiguration, buildI3xRequestHeaders } from './auth';
+import { buildI3xRequestHeaders, configureHttpAuthForMicroflow } from './auth';
 
 let studioPro: StudioProApi | null = null;
 
@@ -233,7 +233,7 @@ async function ensureMicroflowForObject(
     locationTemplateArg.expression = `'${objectsUrl}'`;
     locationTemplate.arguments = [locationTemplateArg];
     httpConfiguration.customLocationTemplate = locationTemplate;
-    await applyAuthToHttpConfiguration(httpConfiguration, connection.auth);
+    await configureHttpAuthForMicroflow(sp, httpConfiguration, connection.auth);
     restCall.httpConfiguration = httpConfiguration;
 
     resultHandling.storeInVariable = true;
@@ -378,15 +378,22 @@ export async function createQueryValuesMicroflow(
     locationTemplateArg.expression = `'${objectsValueUrl}'`;
     locationTemplate.arguments = [locationTemplateArg];
     httpConfiguration.customLocationTemplate = locationTemplate;
-    await applyAuthToHttpConfiguration(httpConfiguration, connection.auth);
+    await configureHttpAuthForMicroflow(sp, httpConfiguration, connection.auth);
 
     // /objects/value expects JSON payload; include explicit headers for reliable POST handling.
-    const acceptHeader = await httpConfiguration.addHttpHeaderEntry();
+    const acceptHeader = (await sp.app.model.microflows.createElement(
+        'Microflows$HttpHeaderEntry'
+    )) as Microflows.HttpHeaderEntry;
     acceptHeader.key = 'Accept';
     acceptHeader.value = 'application/json';
-    const contentTypeHeader = await httpConfiguration.addHttpHeaderEntry();
+    httpConfiguration.headerEntries.push(acceptHeader);
+    
+    const contentTypeHeader = (await sp.app.model.microflows.createElement(
+        'Microflows$HttpHeaderEntry'
+    )) as Microflows.HttpHeaderEntry;
     contentTypeHeader.key = 'Content-Type';
     contentTypeHeader.value = 'application/json';
+    httpConfiguration.headerEntries.push(contentTypeHeader);
 
     restCall.httpConfiguration = httpConfiguration;
 
