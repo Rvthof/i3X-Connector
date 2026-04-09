@@ -3,7 +3,7 @@ import {copyToAppPlugin, copyManifestPlugin, commonConfig} from "./build.helpers
 import parseArgs from "minimist"
 
 const outDir = `dist/i3X-Connector`
-const appDir = "C:\\Users\\Robert.van.Thof\\Mendix\\i3x-Connector-main"
+const appDir = "C:\\Users\\mxwsah\\Mendix\\i3x-Connector-main"
 const extensionDirectoryName = "extensions"
 
 const entryPoints = [

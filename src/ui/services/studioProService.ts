@@ -59,7 +59,7 @@ function toModelName(raw: string): string {
     return startsWithLetter || 'Unnamed';
 }
 
-function getAttributeType(property: LeafProperty): MendixAttributeType | undefined {
+function getAttributeType(property: LeafProperty): MendixAttributeType {
     if (property.type === 'string') {
         if (property.format === 'date-time' || property.format === 'date') {
             return 'DateTime';
@@ -82,7 +82,7 @@ function getAttributeType(property: LeafProperty): MendixAttributeType | undefin
         return 'Decimal';
     }
 
-    return undefined;
+    return 'String';
 }
 
 function clampToMendixLong(value: number): number {
@@ -251,6 +251,7 @@ async function populateMicroflowWithRestCall(
     restCall.resultHandling = resultHandling;
     restCall.resultHandlingType = 'String';
     restCall.errorResultHandlingType = 'None';
+    restCall.timeOutExpression = '300';
 
     actionActivity.action = restCall;
     actionActivity.size = { width: 120, height: 60 };
@@ -431,7 +432,7 @@ async function buildDomainModelEntities(
             const attributeType = getAttributeType(leafProperty);
             await groupEntity.addAttribute({
                 name: attributeName,
-                ...(attributeType ? { type: attributeType } : {}),
+                type: attributeType,
             });
             attributesCreated += 1;
         }
@@ -452,7 +453,7 @@ async function buildDomainModelEntities(
         const attributeType = getAttributeType(property);
         await baseEntity.addAttribute({
             name: attributeName,
-            ...(attributeType ? { type: attributeType } : {}),
+            type: attributeType,
         });
         attributesCreated += 1;
     }
