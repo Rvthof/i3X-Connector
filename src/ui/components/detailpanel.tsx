@@ -334,9 +334,34 @@ const DetailPanel: React.FC<Props> = ({ context, connection, item, onClose, onIm
                 connection,
                 'i3X_Connector'
             );
+            const somethingCreated =
+                result.baseEntityCreated ||
+                result.groupEntitiesCreated > 0 ||
+                result.attributesCreated > 0 ||
+                result.associationsCreated > 0 ||
+                result.jsonStructureCreated ||
+                result.importMappingCreated ||
+                result.microflowCreated;
+
+            const parts = [
+                `Base '${result.baseEntityName}'`,
+                `Group entities: ${result.groupEntitiesCreated}`,
+                `Attributes: ${result.attributesCreated}`,
+                `Associations: ${result.associationsCreated}`,
+                `JSON Structure '${result.jsonStructureName}' ${
+                    result.jsonStructureCreated ? 'created' : 'updated'
+                }`,
+                `Import Mapping '${result.importMappingName}' ${
+                    result.importMappingCreated ? 'created' : 'already exists'
+                }`,
+                `Microflow '${result.microflowName}' ${
+                    result.microflowCreated ? 'created' : 'already exists'
+                }`,
+            ];
+
             await studioPro.ui.notifications.show({
-                title: result.microflowCreated ? 'Value query microflow created' : 'Value query microflow already exists',
-                message: result.microflowName,
+                title: somethingCreated ? 'Value query artifacts prepared' : 'Value query artifacts already exist',
+                message: parts.join(' | '),
                 displayDurationInSeconds: 6,
             });
         } catch (error) {
