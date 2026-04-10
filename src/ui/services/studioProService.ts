@@ -58,6 +58,11 @@ interface ImportMappingResult {
     mappingId: string;
 }
 
+interface JsonSampleResponse {
+    parsed: unknown;
+    rawText: string;
+}
+
 interface ValueQueryArtifactsResult extends DomainModelResult {
     jsonStructureName: string;
     jsonStructureCreated: boolean;
@@ -260,7 +265,7 @@ function inferPropertyFromSample(value: unknown): AnyProperty {
     }
 
     if (typeof value === 'number') {
-        return { type: Number.isInteger(value) ? 'integer' : 'number' };
+        return { type: 'number' };
     }
 
     return { type: 'string' };
@@ -363,6 +368,16 @@ async function fetchJsonSample(
     connection: ConnectionConfig,
     init?: RequestInit
 ): Promise<unknown> {
+    const responseData = await fetchJsonSampleResponse(sp, url, connection, init);
+    return responseData.parsed;
+}
+
+async function fetchJsonSampleResponse(
+    sp: StudioProApi,
+    url: string,
+    connection: ConnectionConfig,
+    init?: RequestInit
+): Promise<JsonSampleResponse> {
     const proxyUrl = await sp.network.httpProxy.getProxyUrl(url);
     const response = await fetch(proxyUrl, {
         ...init,
@@ -378,7 +393,11 @@ async function fetchJsonSample(
         throw new Error(`i3X request failed with status ${response.status} for '${url}'.${details}`);
     }
 
-    return await response.json();
+    const rawText = await response.text();
+    return {
+        parsed: JSON.parse(rawText),
+        rawText,
+    };
 }
 
 async function getProjectModule(
@@ -642,7 +661,10 @@ async function buildDomainModelEntities(
 
     let baseEntityCreated = false;
     if (!domainModel.getEntity(baseEntityName)) {
-        await domainModel.addEntity({ name: baseEntityName });
+        const entity = await domainModel.addEntity({ name: baseEntityName });
+        if (entity.generalization.$Type === 'DomainModels$NoGeneralization') {
+            entity.generalization.persistable = false;
+        }
         baseEntityCreated = true;
     }
 
@@ -671,7 +693,10 @@ async function buildDomainModelEntities(
                 const groupEntityInfo = getOrCreateEntityName(domainModel, preferredGroupEntityName);
 
                 if (groupEntityInfo.created) {
-                    await domainModel.addEntity({ name: groupEntityInfo.name });
+                    const entity = await domainModel.addEntity({ name: groupEntityInfo.name });
+                    if (entity.generalization.$Type === 'DomainModels$NoGeneralization') {
+                        entity.generalization.persistable = false;
+                    }
                     groupEntitiesCreated += 1;
                 }
 
@@ -733,7 +758,10 @@ async function buildDomainModelEntities(
         const groupEntityInfo = getOrCreateEntityName(domainModel, preferredGroupEntityName);
 
         if (groupEntityInfo.created) {
-            await domainModel.addEntity({ name: groupEntityInfo.name });
+            const entity = await domainModel.addEntity({ name: groupEntityInfo.name });
+            if (entity.generalization.$Type === 'DomainModels$NoGeneralization') {
+                entity.generalization.persistable = false;
+            }
             groupEntitiesCreated += 1;
         }
 
@@ -818,6 +846,7 @@ async function createOrUpdateJsonStructure(
     }
 
     const created = await sp.app.model.jsonStructures.addJsonStructure(moduleId, { name: structureName, jsonSnippet });
+    await sp.app.model.jsonStructures.save(created);
     return { created: true, jsonStructureId: created.$ID };
 }
 
@@ -845,6 +874,7 @@ async function createOrUpdateImportMapping(
             mapElements: { mappingType: 'automatic' },
         },
     });
+    await sp.app.model.importMappings.save(createdMapping);
     return { created: true, mappingId: createdMapping.$ID };
 }
 
@@ -859,7 +889,7 @@ async function createValueQueryArtifacts(
 ): Promise<ValueQueryArtifactsResult> {
     const baseEntityName = toModelName(`${objectType.displayName}_${selectedObject.displayName}`);
     const requestBody = buildValueQueryHttpRequestBody(selectedObject.elementId.trim());
-    const sampleResponse = await fetchJsonSample(sp, objectsValueUrl, connection, {
+    const sampleResponse = await fetchJsonSampleResponse(sp, objectsValueUrl, connection, {
         method: 'POST',
         headers: {
             Accept: 'application/json',
@@ -867,14 +897,14 @@ async function createValueQueryArtifacts(
         },
         body: requestBody,
     });
-    const latestValueSample = extractValueQueryPayload(sampleResponse);
+    const latestValueSample = extractValueQueryPayload(sampleResponse.parsed);
     const normalizedSample = normalizeSampleForMapping(latestValueSample);
     const generatedObjectType = buildObjectTypeFromSample(baseEntityName, normalizedSample);
     const domainModelResult = await buildDomainModelEntities(sp, generatedObjectType, moduleName);
 
     const jsonStructureName = `JSON_${baseEntityName}`;
     const importMappingName = `IM_${baseEntityName}`;
-    const jsonSnippet = JSON.stringify(sanitizeJsonForMendixLimits(normalizedSample), null, 2);
+    const jsonSnippet = sampleResponse.rawText;
     const jsonStructureResult = await createOrUpdateJsonStructure(
         sp,
         moduleId,
