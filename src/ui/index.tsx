@@ -2,7 +2,7 @@ import React, { StrictMode, useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { IComponent, getStudioProApi } from "@mendix/extensions-api";
 import { Loader, List, DetailPanel } from "./components/_components";
-import { initStudioPro, implementObjectAsEntity } from "./services/studioProService";
+import { initStudioPro, implementObjectAsEntity, summarizeArtifactResult } from "./services/studioProService";
 import { ConnectionConfig, ObjectType } from "./types";
 import styles from "./index.module.css";
 import "./index.module.css";
@@ -50,14 +50,7 @@ export const component: IComponent = {
 
                     const result = await implementObjectAsEntity(item, connection, "i3X_Connector");
 
-                    const somethingCreated =
-                        result.baseEntityCreated ||
-                        result.groupEntitiesCreated > 0 ||
-                        result.attributesCreated > 0 ||
-                        result.associationsCreated > 0 ||
-                        result.jsonStructureCreated ||
-                        result.importMappingCreated ||
-                        result.microflowCreated;
+                    const { somethingCreated, summary } = summarizeArtifactResult(result);
 
                     if (result.jsonFetchFailed) {
                         await studioPro.ui.notifications.show({
@@ -68,22 +61,9 @@ export const component: IComponent = {
                     }
 
                     if (somethingCreated) {
-                        const parts = [
-                            `Base '${result.baseEntityName}'`,
-                            `Group entities: ${result.groupEntitiesCreated}`,
-                            `Attributes: ${result.attributesCreated}`,
-                            `Associations: ${result.associationsCreated}`,
-                            `JSON Structure '${result.jsonStructureName}' ${
-                                result.jsonStructureCreated ? 'created' : 'updated'
-                            }`,
-                            `Import Mapping '${result.importMappingName}' ${
-                                result.importMappingCreated ? 'created' : 'already exists'
-                            }`,
-                            `Microflow '${result.microflowName}' ${result.microflowCreated ? 'created' : 'already exists'}`,
-                        ];
                         await studioPro.ui.notifications.show({
                             title: "Entities implemented",
-                            message: parts.join(' | '),
+                            message: summary,
                             displayDurationInSeconds: 6,
                         });
                     } else {

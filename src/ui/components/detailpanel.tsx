@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { ComponentContext, getStudioProApi } from '@mendix/extensions-api';
 import styles from '../index.module.css';
 import { ObjectType, AnyProperty, ConnectionConfig, isGroupProperty, isArrayProperty, extractArrayItemProperties } from '../types';
-import { createQueryValuesMicroflow } from '../services/studioProService';
+import { createQueryValuesMicroflow, summarizeArtifactResult } from '../services/studioProService';
 import { getObjectsUrl } from '../services/i3xUrl';
 import { buildI3xRequestHeaders } from '../services/auth';
 
@@ -334,14 +334,7 @@ const DetailPanel: React.FC<Props> = ({ context, connection, item, onClose, onIm
                 connection,
                 'i3X_Connector'
             );
-            const somethingCreated =
-                result.baseEntityCreated ||
-                result.groupEntitiesCreated > 0 ||
-                result.attributesCreated > 0 ||
-                result.associationsCreated > 0 ||
-                result.jsonStructureCreated ||
-                result.importMappingCreated ||
-                result.microflowCreated;
+            const { somethingCreated, summary } = summarizeArtifactResult(result);
 
             if (result.jsonFetchFailed) {
                 await studioPro.ui.notifications.show({
@@ -351,25 +344,9 @@ const DetailPanel: React.FC<Props> = ({ context, connection, item, onClose, onIm
                 });
             }
 
-            const parts = [
-                `Base '${result.baseEntityName}'`,
-                `Group entities: ${result.groupEntitiesCreated}`,
-                `Attributes: ${result.attributesCreated}`,
-                `Associations: ${result.associationsCreated}`,
-                `JSON Structure '${result.jsonStructureName}' ${
-                    result.jsonStructureCreated ? 'created' : 'updated'
-                }`,
-                `Import Mapping '${result.importMappingName}' ${
-                    result.importMappingCreated ? 'created' : 'already exists'
-                }`,
-                `Microflow '${result.microflowName}' ${
-                    result.microflowCreated ? 'created' : 'already exists'
-                }`,
-            ];
-
             await studioPro.ui.notifications.show({
                 title: somethingCreated ? 'Value query artifacts prepared' : 'Value query artifacts already exist',
-                message: parts.join(' | '),
+                message: summary,
                 displayDurationInSeconds: 6,
             });
         } catch (error) {
