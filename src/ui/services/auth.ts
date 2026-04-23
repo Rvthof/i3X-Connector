@@ -6,10 +6,15 @@ function toBase64(value: string): string {
     return btoa(value);
 }
 
+// RFC 7230 token chars; strips anything that could inject extra headers.
+function sanitizeHeaderName(raw: string): string {
+    return raw.replace(/[^\w!#$%&'*+\-.^`|~]/g, '').trim();
+}
+
 function toTokenHeaderValue(auth: Extract<AuthConfig, { mode: 'token' }>): string {
     const token = auth.token.trim();
     const prefix = auth.prefix.trim();
-    const headerName = auth.headerName.trim() || 'Authorization';
+    const headerName = sanitizeHeaderName(auth.headerName) || 'Authorization';
 
     if (/^i3x\./i.test(token) && /^authorization$/i.test(headerName) && /^bearer$/i.test(prefix)) {
         return token;
@@ -28,7 +33,7 @@ function buildAuthHeaderValue(auth: AuthConfig): { key: string; value: string } 
         return { key: 'Authorization', value: `Basic ${basicToken}` };
     }
 
-    const headerName = auth.headerName.trim() || 'Authorization';
+    const headerName = sanitizeHeaderName(auth.headerName) || 'Authorization';
     return { key: headerName, value: toTokenHeaderValue(auth) };
 }
 
@@ -59,7 +64,7 @@ export async function configureHttpAuthForMicroflow(
 
     // Handle token-based auth via headers
     if (auth.mode !== 'none' && auth.mode !== 'basic') {
-        const headerName = auth.headerName.trim() || 'Authorization';
+        const headerName = sanitizeHeaderName(auth.headerName) || 'Authorization';
         const authHeader = (await sp.app.model.microflows.createElement(
             'Microflows$HttpHeaderEntry'
         )) as Microflows.HttpHeaderEntry;
