@@ -293,6 +293,75 @@ interface DomainModelResult {
     associationsCreated: number;
 }
 
+interface EntityCounters {
+    groupEntitiesCreated: number;
+    attributesCreated: number;
+    associationsCreated: number;
+    nextNestedEntityY: number;
+}
+
+function computeEntityStartY(domainModel: DomainModels.DomainModel): number {
+    let startY = 0;
+    for (const ent of domainModel.entities) {
+        const bottom = ent.location.y + ENTITY_HDR_H + ATTR_ROW_H + V_GAP;
+        if (bottom > startY) startY = bottom;
+    }
+    return startY;
+}
+
+function getGroupY(groupEntryList: [string, AnyProperty][], startY: number, groupIndex: number): number {
+    let groupY = startY;
+    for (let i = 0; i < groupIndex; i++) {
+        const [, previousProperty] = groupEntryList[i];
+        const previousAttrCount = countDirectLeafProperties(getChildPropertiesIfAny(previousProperty) ?? {});
+        groupY += entityHeight(previousAttrCount) + V_GAP;
+    }
+    return groupY;
+}
+
+async function populateEntityProperties(
+    domainModel: DomainModels.DomainModel,
+    parentEntityName: string,
+    parentEntity: DomainModels.Entity,
+    properties: Record<string, AnyProperty>,
+    depth: number,
+    counters: EntityCounters
+): Promise<void> {
+    for (const [propertyName, property] of Object.entries(properties)) {
+        const nestedProperties = getChildPropertiesIfAny(property);
+
+        if (nestedProperties) {
+            const isResolvableArray = isArrayProperty(property);
+            const groupEntityInfo = await ensureEntity(domainModel, `${parentEntityName}_${propertyName}`);
+
+            if (groupEntityInfo.created) {
+                counters.groupEntitiesCreated += 1;
+                groupEntityInfo.entity.location = {
+                    x: depth * (BASE_WIDTH + H_GAP),
+                    y: counters.nextNestedEntityY,
+                };
+                counters.nextNestedEntityY += entityHeight(countDirectLeafProperties(nestedProperties)) + V_GAP;
+            }
+
+            const assocName = `${parentEntityName}_${groupEntityInfo.entityName}`;
+            if (await ensureAssociation(domainModel, assocName, parentEntity.$ID, groupEntityInfo.entity.$ID, isResolvableArray)) {
+                counters.associationsCreated += 1;
+            }
+
+            await populateEntityProperties(domainModel, groupEntityInfo.entityName, groupEntityInfo.entity, nestedProperties, depth + 1, counters);
+            continue;
+        }
+
+        if (isArrayProperty(property)) continue;
+
+        const attributeName = toModelName(propertyName);
+        if (parentEntity.getAttribute(attributeName)) continue;
+
+        await parentEntity.addAttribute({ name: attributeName, type: getAttributeType(property as LeafProperty) });
+        counters.attributesCreated += 1;
+    }
+}
+
 async function buildDomainModelEntities(
     sp: StudioProApi,
     selectedObject: ObjectType,
@@ -309,142 +378,48 @@ async function buildDomainModelEntities(
     }
 
     const allProperties = selectedObject.schema.properties ?? {};
+    const groupEntryList = Object.entries(allProperties).filter(([, p]) => getChildPropertiesIfAny(p) !== null);
+    const leafCount = Object.entries(allProperties).filter(([, p]) => getChildPropertiesIfAny(p) === null).length;
 
-    const groupEntryList = Object.entries(allProperties).filter(([, property]) => getChildPropertiesIfAny(property) !== null);
-    const leafCount = Object.entries(allProperties).filter(
-        ([, property]) => getChildPropertiesIfAny(property) === null
-    ).length;
-    const baseHeight = entityHeight(leafCount);
-
-    // Place new entities below any existing ones to avoid overlap.
-    let startY = 0;
-    for (const ent of domainModel.entities) {
-        const bottom = ent.location.y + ENTITY_HDR_H + ATTR_ROW_H + V_GAP;
-        if (bottom > startY) startY = bottom;
-    }
+    const startY = computeEntityStartY(domainModel);
 
     // Centre the base entity vertically against the group column.
     const groupColumnHeight = groupEntryList.reduce((sum, [, p]) => {
-        const attrCount = countDirectLeafProperties(getChildPropertiesIfAny(p) ?? {});
-        return sum + entityHeight(attrCount) + V_GAP;
+        return sum + entityHeight(countDirectLeafProperties(getChildPropertiesIfAny(p) ?? {})) + V_GAP;
     }, -V_GAP);
-    const baseY = startY + Math.max(0, (groupColumnHeight - baseHeight) / 2);
+    const baseY = startY + Math.max(0, (groupColumnHeight - entityHeight(leafCount)) / 2);
 
     const baseEntityInfo = await ensureEntity(domainModel, baseEntityName);
     if (baseEntityInfo.created) {
         baseEntityInfo.entity.location = { x: 0, y: baseY };
     }
 
-    let groupEntitiesCreated = 0;
-    let attributesCreated = 0;
-    let associationsCreated = 0;
-    let nextNestedEntityY = startY;
-
-    const getGroupYAtIndex = (groupIndex: number): number => {
-        let groupY = startY;
-        for (let i = 0; i < groupIndex; i++) {
-            const [, previousProperty] = groupEntryList[i];
-            const previousAttrCount = countDirectLeafProperties(getChildPropertiesIfAny(previousProperty) ?? {});
-            groupY += entityHeight(previousAttrCount) + V_GAP;
-        }
-        return groupY;
-    };
-
-    const populateEntityProperties = async (
-        parentEntityName: string,
-        parentEntity: DomainModels.Entity,
-        properties: Record<string, AnyProperty>,
-        depth: number
-    ): Promise<void> => {
-        for (const [propertyName, property] of Object.entries(properties)) {
-            const nestedProperties = getChildPropertiesIfAny(property);
-
-            if (nestedProperties) {
-                const isResolvableArray = isArrayProperty(property);
-                const groupEntityInfo = await ensureEntity(domainModel, `${parentEntityName}_${propertyName}`);
-
-                if (groupEntityInfo.created) {
-                    groupEntitiesCreated += 1;
-                }
-
-                if (groupEntityInfo.created) {
-                    groupEntityInfo.entity.location = {
-                        x: depth * (BASE_WIDTH + H_GAP),
-                        y: nextNestedEntityY,
-                    };
-                    nextNestedEntityY += entityHeight(countDirectLeafProperties(nestedProperties)) + V_GAP;
-                }
-
-                const assocName = `${parentEntityName}_${groupEntityInfo.entityName}`;
-                if (await ensureAssociation(
-                    domainModel,
-                    assocName,
-                    parentEntity.$ID,
-                    groupEntityInfo.entity.$ID,
-                    isResolvableArray
-                )) {
-                    associationsCreated += 1;
-                }
-
-                await populateEntityProperties(
-                    groupEntityInfo.entityName,
-                    groupEntityInfo.entity,
-                    nestedProperties,
-                    depth + 1
-                );
-                continue;
-            }
-
-            if (isArrayProperty(property)) {
-                continue;
-            }
-
-            const attributeName = toModelName(propertyName);
-            if (parentEntity.getAttribute(attributeName)) {
-                continue;
-            }
-
-            const attributeType = getAttributeType(property as LeafProperty);
-            await parentEntity.addAttribute({
-                name: attributeName,
-                type: attributeType,
-            });
-            attributesCreated += 1;
-        }
+    const counters: EntityCounters = {
+        groupEntitiesCreated: 0,
+        attributesCreated: 0,
+        associationsCreated: 0,
+        nextNestedEntityY: startY,
     };
 
     // ── Group properties → associated entities ────────────────────────────────
     for (const [groupIndex, [propertyName, property]] of groupEntryList.entries()) {
-        const nestedProperties = getChildPropertiesIfAny(property);
-        if (!nestedProperties) {
-            continue;
-        }
-
+        const nestedProperties = getChildPropertiesIfAny(property)!;
         const isResolvableArray = isArrayProperty(property);
         const groupEntityInfo = await ensureEntity(domainModel, `${baseEntityName}_${propertyName}`);
 
         if (groupEntityInfo.created) {
-            groupEntitiesCreated += 1;
-        }
-
-        if (groupEntityInfo.created) {
-            const groupY = getGroupYAtIndex(groupIndex);
+            counters.groupEntitiesCreated += 1;
+            const groupY = getGroupY(groupEntryList, startY, groupIndex);
             groupEntityInfo.entity.location = { x: BASE_WIDTH + H_GAP, y: groupY };
-            nextNestedEntityY = Math.max(nextNestedEntityY, groupY + entityHeight(countDirectLeafProperties(nestedProperties)) + V_GAP);
+            counters.nextNestedEntityY = Math.max(counters.nextNestedEntityY, groupY + entityHeight(countDirectLeafProperties(nestedProperties)) + V_GAP);
         }
 
         const assocName = `${baseEntityName}_${groupEntityInfo.entityName}`;
-        if (await ensureAssociation(
-            domainModel,
-            assocName,
-            baseEntityInfo.entity.$ID,
-            groupEntityInfo.entity.$ID,
-            isResolvableArray
-        )) {
-            associationsCreated += 1;
+        if (await ensureAssociation(domainModel, assocName, baseEntityInfo.entity.$ID, groupEntityInfo.entity.$ID, isResolvableArray)) {
+            counters.associationsCreated += 1;
         }
 
-        await populateEntityProperties(groupEntityInfo.entityName, groupEntityInfo.entity, nestedProperties, 2);
+        await populateEntityProperties(domainModel, groupEntityInfo.entityName, groupEntityInfo.entity, nestedProperties, 2, counters);
     }
 
     // ── Leaf properties → attributes on base entity ───────────────────────────
@@ -454,12 +429,8 @@ async function buildDomainModelEntities(
         const attributeName = toModelName(propertyName);
         if (baseEntityInfo.entity.getAttribute(attributeName)) continue;
 
-        const attributeType = getAttributeType(property as LeafProperty);
-        await baseEntityInfo.entity.addAttribute({
-            name: attributeName,
-            type: attributeType,
-        });
-        attributesCreated += 1;
+        await baseEntityInfo.entity.addAttribute({ name: attributeName, type: getAttributeType(property as LeafProperty) });
+        counters.attributesCreated += 1;
     }
 
     await sp.app.model.domainModels.save(domainModel);
@@ -467,9 +438,9 @@ async function buildDomainModelEntities(
     return {
         baseEntityName,
         baseEntityCreated: baseEntityInfo.created,
-        groupEntitiesCreated,
-        attributesCreated,
-        associationsCreated,
+        groupEntitiesCreated: counters.groupEntitiesCreated,
+        attributesCreated: counters.attributesCreated,
+        associationsCreated: counters.associationsCreated,
     };
 }
 
