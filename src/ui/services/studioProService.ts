@@ -105,7 +105,7 @@ type ModuleLookupApi = {
 
 type MendixAttributeType = NonNullable<DomainModels.AttributeCreationOptions['type']>;
 const MENDIX_LONG_MIN = Number('-9223372036854775808');
-const MENDIX_LONG_MAX = Number('9223372036854775807');
+export const MENDIX_LONG_MAX = Number('9223372036854775807');
 
 // ── Layout constants ──────────────────────────────────────────────────────────
 const ATTR_ROW_H  = 20;   // px per attribute row

@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { ComponentContext, getStudioProApi } from '@mendix/extensions-api';
 import styles from '../index.module.css';
 import { ObjectType, AnyProperty, ConnectionConfig, isGroupProperty, isArrayProperty, extractArrayItemProperties } from '../types';
-import { createQueryValuesMicroflow, summarizeArtifactResult } from '../services/studioProService';
+import { createQueryValuesMicroflow, summarizeArtifactResult, MENDIX_LONG_MAX } from '../services/studioProService';
 import { getObjectsUrl } from '../services/i3xUrl';
 import { buildI3xRequestHeaders } from '../services/auth';
 
@@ -20,13 +20,10 @@ interface Props {
 
 // ─── Constraint pills ─────────────────────────────────────────────────────────
 
-const FLOAT_MAX = 1.7976931348623157e308;
-const INT_MAX   = 9223372036854775807;
-
 function formatConstraint(key: string, value: unknown): string | null {
     if (typeof value !== 'number' && typeof value !== 'string' && typeof value !== 'boolean') return null;
     if (typeof value === 'number') {
-        if (Math.abs(value) >= FLOAT_MAX * 0.999 || Math.abs(value) >= INT_MAX * 0.999) return null;
+        if (Math.abs(value) >= Number.MAX_VALUE * 0.999 || Math.abs(value) >= MENDIX_LONG_MAX * 0.999) return null;
     }
     const labels: Record<string, string> = {
         minimum: 'min', maximum: 'max', maxLength: 'maxLen',
