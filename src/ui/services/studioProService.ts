@@ -47,6 +47,7 @@ export interface ArtifactCreationResult {
     importMappingCreated: boolean;
     microflowName: string;
     microflowCreated: boolean;
+    jsonFetchFailed: boolean;
 }
 
 export type ImplementEntityResult = ArtifactCreationResult;
@@ -565,10 +566,10 @@ async function buildObjectTypeJsonSnippet(
     selectedObject: ObjectType,
     connection: ConnectionConfig,
     objectsUrl: string | null
-): Promise<string> {
+): Promise<{ snippet: string; fetchFailed: boolean }> {
     const fallbackSnippet = JSON.stringify(sanitizeJsonForMendixLimits(selectedObject), null, 2);
     if (!objectsUrl) {
-        return fallbackSnippet;
+        return { snippet: fallbackSnippet, fetchFailed: false };
     }
 
     try {
@@ -576,10 +577,15 @@ async function buildObjectTypeJsonSnippet(
         const response = await fetch(proxyUrl, {
             headers: buildI3xRequestHeaders(connection.auth),
         });
-        const data = response.ok ? await response.json() : selectedObject;
-        return JSON.stringify(sanitizeJsonForMendixLimits(data), null, 2);
-    } catch {
-        return fallbackSnippet;
+        if (!response.ok) {
+            console.warn(`[i3X] Failed to fetch object instances (HTTP ${response.status}); JSON structure will use schema fallback.`);
+            return { snippet: fallbackSnippet, fetchFailed: true };
+        }
+        const data = await response.json();
+        return { snippet: JSON.stringify(sanitizeJsonForMendixLimits(data), null, 2), fetchFailed: false };
+    } catch (err) {
+        console.warn('[i3X] Error fetching object instances; JSON structure will use schema fallback.', err);
+        return { snippet: fallbackSnippet, fetchFailed: true };
     }
 }
 
@@ -651,6 +657,7 @@ export async function createQueryValuesMicroflow(
             ...artifactResult,
             microflowName,
             microflowCreated: false,
+            jsonFetchFailed: false,
         };
     }
 
@@ -670,6 +677,7 @@ export async function createQueryValuesMicroflow(
         ...artifactResult,
         microflowName,
         microflowCreated: true,
+        jsonFetchFailed: false,
     };
 }
 
@@ -689,7 +697,7 @@ export async function implementObjectAsEntity(
 
     const objectTypeId = selectedObject.elementId.trim();
     const objectsUrl = objectTypeId ? getObjectsUrl(connection.apiBaseUrl, objectTypeId) : null;
-    const jsonSnippet = await buildObjectTypeJsonSnippet(sp, selectedObject, connection, objectsUrl);
+    const { snippet: jsonSnippet, fetchFailed: jsonFetchFailed } = await buildObjectTypeJsonSnippet(sp, selectedObject, connection, objectsUrl);
     const jsonStructureResult = await createOrUpdateJsonStructure(
         sp,
         module.$ID,
@@ -724,5 +732,6 @@ export async function implementObjectAsEntity(
         importMappingCreated: importMappingResult.created,
         microflowName,
         microflowCreated,
+        jsonFetchFailed,
     };
 }

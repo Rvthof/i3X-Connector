@@ -59,6 +59,14 @@ export const component: IComponent = {
                         result.importMappingCreated ||
                         result.microflowCreated;
 
+                    if (result.jsonFetchFailed) {
+                        await studioPro.ui.notifications.show({
+                            title: "JSON Structure uses schema fallback",
+                            message: `Could not fetch live object instances from the i3X API. The JSON Structure '${result.jsonStructureName}' was built from the object type schema instead.`,
+                            displayDurationInSeconds: 8,
+                        });
+                    }
+
                     if (somethingCreated) {
                         const parts = [
                             `Base '${result.baseEntityName}'`,

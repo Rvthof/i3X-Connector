@@ -75,7 +75,7 @@ const Loader: React.FC<LoaderProps> = ({ context, setApiData, setConnection }) =
             const proxy = await studioPro.network.httpProxy.getProxyUrl(objectTypesUrl);
             const response = await fetch(proxy, { headers: buildI3xRequestHeaders(auth) });
             if (!response.ok) {
-                await messageApi.show('error', `Request failed with status ${response.status}.`);
+                await messageApi.show('error', `Request failed with status ${response.status} for '${objectTypesUrl}'.`);
                 return;
             }
             const data = await response.json();

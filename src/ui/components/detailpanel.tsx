@@ -271,7 +271,7 @@ const DetailPanel: React.FC<Props> = ({ context, connection, item, onClose, onIm
                 const response = await fetch(proxy, { headers: buildI3xRequestHeaders(connection.auth) });
                 if (!response.ok) {
                     if (!cancelled) {
-                        setObjectsLoadError(`Status: ${response.status}`);
+                        setObjectsLoadError(`Request failed with status ${response.status} for '${objectsUrl}'.`);
                     }
                     return;
                 }
@@ -342,6 +342,14 @@ const DetailPanel: React.FC<Props> = ({ context, connection, item, onClose, onIm
                 result.jsonStructureCreated ||
                 result.importMappingCreated ||
                 result.microflowCreated;
+
+            if (result.jsonFetchFailed) {
+                await studioPro.ui.notifications.show({
+                    title: "JSON Structure uses schema fallback",
+                    message: `Could not fetch live object instances from the i3X API. The JSON Structure '${result.jsonStructureName}' was built from the object type schema instead.`,
+                    displayDurationInSeconds: 8,
+                });
+            }
 
             const parts = [
                 `Base '${result.baseEntityName}'`,
