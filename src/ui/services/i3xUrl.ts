@@ -4,6 +4,7 @@ const KNOWN_SUFFIX_REGEXES = [
     /\/objects\/history$/i,
     /\/objects\/list$/i,
     /\/objects\/related$/i,
+    /\/objects\/[^/]+\/value$/i,
     /\/objects$/i,
 ];
 
@@ -68,4 +69,8 @@ export function getObjectsUrl(apiBaseUrl: string, typeId: string): string | null
 
 export function getObjectsValueUrl(apiBaseUrl: string): string | null {
     return buildFromBase(apiBaseUrl, '/objects/value')?.toString() ?? null;
+}
+
+export function getObjectsHistoryUrl(apiBaseUrl: string): string | null {
+    return buildFromBase(apiBaseUrl, '/objects/history')?.toString() ?? null;
 }

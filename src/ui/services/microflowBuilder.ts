@@ -5,6 +5,7 @@ import { configureHttpAuthForMicroflow } from './auth';
 export interface RestMicroflowOptions {
     url: string;
     requestBody: string;
+    requestBodyArgs?: string[];
     extraHeaders?: Array<{ key: string; value: string }>;
     connection: ConnectionConfig;
     importMappingId?: string;
@@ -17,6 +18,19 @@ export function buildValueQueryHttpRequestBody(selectedElementId: string): strin
   ],
   "maxDepth": 1
 }`;
+}
+
+export interface HistoryRequestBody {
+    text: string;
+    args: string[];
+}
+
+export function buildHistoryMicroflowRequestBody(elementId: string): HistoryRequestBody {
+    return {
+        // {1} = elementId (baked in), {2} = $StartTime param, {3} = $EndTime param
+        text: `{{"elementIds":["{1}"],"startTime":"{2}","endTime":"{3}"}`,
+        args: [`'${elementId}'`, '$StartTime', '$EndTime'],
+    };
 }
 
 export function buildValueQueryMicroflowRequestBody(selectedElementId: string): string {
@@ -113,7 +127,7 @@ export async function populateMicroflowWithRestCall(
     microflow: Microflows.Microflow,
     options: RestMicroflowOptions
 ): Promise<void> {
-    const { url, requestBody, extraHeaders = [], connection, importMappingId } = options;
+    const { url, requestBody, requestBodyArgs = [], extraHeaders = [], connection, importMappingId } = options;
 
     const actionActivity = (await sp.app.model.microflows.createElement(
         'Microflows$ActionActivity'
@@ -142,6 +156,13 @@ export async function populateMicroflowWithRestCall(
     const stringType = await sp.app.model.microflows.createElement('DataTypes$StringType');
 
     requestTemplate.text = requestBody;
+    for (const argExpr of requestBodyArgs) {
+        const templateArg = (await sp.app.model.microflows.createElement(
+            'Microflows$TemplateArgument'
+        )) as Microflows.TemplateArgument;
+        templateArg.expression = argExpr;
+        requestTemplate.arguments.push(templateArg);
+    }
     requestHandler.template = requestTemplate;
     restCall.requestHandling = requestHandler;
     restCall.requestHandlingType = 'Custom';

@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { ComponentContext, getStudioProApi } from '@mendix/extensions-api';
 import styles from '../index.module.css';
 import { ObjectType, AnyProperty, LeafProperty, ConnectionConfig, isGroupProperty, isArrayProperty, extractArrayItemProperties } from '../types';
-import { createQueryValuesMicroflow, summarizeArtifactResult, MENDIX_LONG_MAX } from '../services/studioProService';
+import { createQueryValuesMicroflow, createHistoryMicroflow, summarizeArtifactResult, MENDIX_LONG_MAX } from '../services/studioProService';
 import { getObjectsUrl } from '../services/i3xUrl';
 import { buildI3xRequestHeaders } from '../services/auth';
 
@@ -274,6 +274,7 @@ const DetailPanel: React.FC<Props> = ({ context, connection, item, allObjectType
     const [activeTab, setActiveTab] = useState<'attributes' | 'objects'>('attributes');
     const [isLoadingObjects, setIsLoadingObjects] = useState(true);
     const [isCreatingQuery, setIsCreatingQuery] = useState(false);
+    const [isCreatingHistory, setIsCreatingHistory] = useState(false);
     const [retrievedObjects, setRetrievedObjects] = useState<unknown[]>([]);
     const [objectsLoadError, setObjectsLoadError] = useState<string | null>(null);
     const [selectedObjectIndex, setSelectedObjectIndex] = useState<number | null>(null);
@@ -432,6 +433,54 @@ const DetailPanel: React.FC<Props> = ({ context, connection, item, allObjectType
         }
     };
 
+    const handleCreateHistoryMicroflow = async () => {
+        if (selectedObjectIndex === null || isCreatingHistory) return;
+
+        const selected = retrievedObjects[selectedObjectIndex];
+        if (!selected || typeof selected !== 'object') {
+            await studioPro.ui.messageBoxes.show('error', 'Invalid selected object', 'Could not read selected object data.');
+            return;
+        }
+
+        const selectedRecord = selected as Record<string, unknown>;
+        const findField = (fieldName: string): unknown =>
+            Object.entries(selectedRecord).find(([k]) => k.toLowerCase() === fieldName.toLowerCase())?.[1];
+
+        const elementIdValue = findField('elementId');
+        if (typeof elementIdValue !== 'string' || !elementIdValue.trim()) {
+            await studioPro.ui.messageBoxes.show('error', 'Missing elementId', 'Selected object does not contain a valid elementId.');
+            return;
+        }
+
+        const rawDisplayName = findField('displayName');
+        const displayNameValue =
+            typeof rawDisplayName === 'string' && rawDisplayName.trim()
+                ? rawDisplayName
+                : elementIdValue;
+
+        setIsCreatingHistory(true);
+        try {
+            const result = await createHistoryMicroflow(
+                item,
+                { elementId: elementIdValue, displayName: displayNameValue },
+                connection,
+                'i3X_Connector'
+            );
+            await studioPro.ui.notifications.show({
+                title: result.microflowCreated ? 'History microflow created' : 'History microflow already exists',
+                message: result.microflowCreated
+                    ? `'${result.microflowName}' created with StartTime and EndTime (DateTime) parameters.`
+                    : `'${result.microflowName}' already exists.`,
+                displayDurationInSeconds: 7,
+            });
+        } catch (error) {
+            const details = error instanceof Error ? error.message : String(error);
+            await studioPro.ui.messageBoxes.show('error', 'Could not create history microflow', details);
+        } finally {
+            setIsCreatingHistory(false);
+        }
+    };
+
     return (
         <div className={styles.detailPanel}>
             {/* Header */}
@@ -554,6 +603,13 @@ const DetailPanel: React.FC<Props> = ({ context, connection, item, allObjectType
                                     disabled={selectedObjectIndex === null || isCreatingQuery}
                                 >
                                     {isCreatingQuery ? 'Creating query...' : 'Create last-known-value query microflow'}
+                                </button>
+                                <button
+                                    className={styles.implementButton}
+                                    onClick={handleCreateHistoryMicroflow}
+                                    disabled={selectedObjectIndex === null || isCreatingHistory}
+                                >
+                                    {isCreatingHistory ? 'Creating...' : 'Create history query microflow'}
                                 </button>
                             </div>
                         </>

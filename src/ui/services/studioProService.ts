@@ -8,11 +8,12 @@ import {
     type LeafProperty,
     type ObjectType,
 } from '../types';
-import { getObjectsUrl, getObjectsValueUrl } from './i3xUrl';
+import { getObjectsUrl, getObjectsValueUrl, getObjectsHistoryUrl } from './i3xUrl';
 import { buildI3xRequestHeaders } from './auth';
 import {
     buildValueQueryHttpRequestBody,
     buildValueQueryMicroflowRequestBody,
+    buildHistoryMicroflowRequestBody,
     populateMicroflowWithRestCall,
 } from './microflowBuilder';
 import { buildObjectTypeFromSample, extractValueQueryPayload } from './schemaInference';
@@ -673,6 +674,74 @@ export async function createQueryValuesMicroflow(
         microflowCreated: true,
         jsonFetchFailed: false,
     };
+}
+
+export interface HistoryMicroflowResult {
+    microflowName: string;
+    microflowCreated: boolean;
+}
+
+export async function createHistoryMicroflow(
+    objectType: ObjectType,
+    selectedObject: { elementId: string; displayName: string },
+    connection: ConnectionConfig,
+    moduleName = 'i3X_Connector'
+): Promise<HistoryMicroflowResult> {
+    const sp = getStudioPro();
+    const selectedElementId = selectedObject.elementId.trim();
+
+    if (!selectedElementId) {
+        throw new Error('Selected object has no valid elementId.');
+    }
+
+    const historyUrl = getObjectsHistoryUrl(connection.apiBaseUrl);
+    if (!historyUrl) {
+        throw new Error(`Cannot build /objects/history URL from '${connection.apiBaseUrl}'.`);
+    }
+
+    const typeName = toModelName(objectType.displayName);
+    const objectName = toModelName(selectedObject.displayName);
+    const microflowName = `MF_${typeName}_${objectName}_History`;
+
+    const module = await getRequiredProjectModule(sp, moduleName);
+
+    const existing = await sp.app.model.microflows.loadAll(
+        u => u.moduleName === moduleName && u.name === microflowName,
+        1
+    );
+    if (existing.length > 0) {
+        return { microflowName, microflowCreated: false };
+    }
+
+    const microflow = await sp.app.model.microflows.addMicroflow(module.$ID, { name: microflowName });
+
+    await microflow.objectCollection.addMicroflowParameterObject({ name: 'StartTime', type: 'DateTime' });
+    const startTimeParam = microflow.objectCollection.getMicroflowParameterObject('StartTime');
+    if (startTimeParam) {
+        startTimeParam.size = { width: 30, height: 30 };
+        startTimeParam.relativeMiddlePoint = { x: 100, y: 0 };
+    }
+
+    await microflow.objectCollection.addMicroflowParameterObject({ name: 'EndTime', type: 'DateTime' });
+    const endTimeParam = microflow.objectCollection.getMicroflowParameterObject('EndTime');
+    if (endTimeParam) {
+        endTimeParam.size = { width: 30, height: 30 };
+        endTimeParam.relativeMiddlePoint = { x: 200, y: 0 };
+    }
+
+    const { text: bodyText, args: bodyArgs } = buildHistoryMicroflowRequestBody(selectedElementId);
+    await populateMicroflowWithRestCall(sp, microflow, {
+        url: historyUrl,
+        requestBody: bodyText,
+        requestBodyArgs: bodyArgs,
+        extraHeaders: [
+            { key: 'Accept', value: `'application/json'` },
+            { key: 'Content-Type', value: `'application/json'` },
+        ],
+        connection,
+    });
+    await sp.app.model.microflows.save(microflow);
+    return { microflowName, microflowCreated: true };
 }
 
 export async function implementObjectAsEntity(
