@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { ComponentContext, getStudioProApi } from '@mendix/extensions-api';
 import styles from '../index.module.css';
-import { ObjectType, AnyProperty, ConnectionConfig, isGroupProperty, isArrayProperty, extractArrayItemProperties } from '../types';
+import { ObjectType, AnyProperty, LeafProperty, ConnectionConfig, isGroupProperty, isArrayProperty, extractArrayItemProperties } from '../types';
 import { createQueryValuesMicroflow, summarizeArtifactResult, MENDIX_LONG_MAX } from '../services/studioProService';
 import { getObjectsUrl } from '../services/i3xUrl';
 import { buildI3xRequestHeaders } from '../services/auth';
@@ -14,6 +14,7 @@ interface Props {
     context: ComponentContext;
     connection: ConnectionConfig;
     item: ObjectType;
+    allObjectTypes: ObjectType[];
     onClose: () => void;
     onImplement: (item: ObjectType) => Promise<void>;
 }
@@ -55,12 +56,21 @@ const TypeBadge: React.FC<{ prop: AnyProperty }> = ({ prop }) => {
     return <span className={styles.typeBadge}>{prop.type}</span>;
 };
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function extractRefName(ref: string): string | null {
+    const match = ref.match(/#\/\$defs\/(.+)/);
+    return match?.[1] ?? null;
+}
+
+type RefResolver = (ref: string) => ObjectType | null;
+
 // ─── Leaf property row ────────────────────────────────────────────────────────
 
-const LeafRow: React.FC<{ name: string; prop: AnyProperty; required: boolean; indent?: boolean }> = ({ name, prop, required, indent }) => (
+const LeafRow: React.FC<{ name: string; prop: AnyProperty; required: boolean; depth?: number }> = ({ name, prop, required, depth = 0 }) => (
     <tr className={styles.propRow}>
         <td className={styles.propNameCell}>
-            {indent && <span className={styles.indent} />}
+            {Array.from({ length: depth }, (_, i) => <span key={i} className={styles.indent} />)}
             <span className={styles.propName}>{name}</span>
         </td>
         <td className={styles.tableCell}>
@@ -79,11 +89,47 @@ const LeafRow: React.FC<{ name: string; prop: AnyProperty; required: boolean; in
 
 // ─── Array section (collapsible) ─────────────────────────────────────────────
 
-const ArraySection: React.FC<{ name: string; prop: AnyProperty; isRequired: boolean }> = ({ name, prop, isRequired }) => {
+const ArraySection: React.FC<{ name: string; prop: AnyProperty; isRequired: boolean; depth?: number; resolveRef: RefResolver }> = ({ name, prop, isRequired, depth = 0, resolveRef }) => {
     const [open, setOpen] = useState(true);
 
     if (!isArrayProperty(prop)) return null;
-    const itemProps = extractArrayItemProperties(prop);
+
+    let itemProps = extractArrayItemProperties(prop);
+
+    const rawItems = (prop as unknown as Record<string, unknown>).items as Record<string, unknown> | undefined;
+
+    // Fall back to resolving the first $ref entry in anyOf
+    if (!itemProps && rawItems && Array.isArray(rawItems.anyOf)) {
+        for (const candidate of rawItems.anyOf as unknown[]) {
+            const c = candidate as Record<string, unknown>;
+            if (typeof c.$ref === 'string') {
+                const resolved = resolveRef(c.$ref);
+                if (resolved?.schema.properties) {
+                    itemProps = resolved.schema.properties as Record<string, LeafProperty>;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Detect scalar item type (e.g. array of strings) for display when there are no object fields
+    let scalarItemType: string | null = null;
+    if (!itemProps && rawItems) {
+        const directType = typeof rawItems.type === 'string' ? rawItems.type : null;
+        if (directType && directType !== 'object' && directType !== 'array') {
+            scalarItemType = directType;
+        } else if (Array.isArray(rawItems.anyOf)) {
+            for (const candidate of rawItems.anyOf as unknown[]) {
+                const c = candidate as Record<string, unknown>;
+                if (typeof c.type === 'string' && c.type !== 'object' && c.type !== 'array') {
+                    scalarItemType = c.type;
+                    break;
+                }
+            }
+        }
+    }
+
+    const indentSpans = Array.from({ length: depth }, (_, i) => <span key={i} className={styles.indent} />);
 
     return (
         <>
@@ -92,19 +138,33 @@ const ArraySection: React.FC<{ name: string; prop: AnyProperty; isRequired: bool
                 onClick={() => setOpen(o => !o)}
             >
                 <td className={styles.propNameCell} colSpan={4}>
+                    {indentSpans}
                     <span className={styles.groupChevron}>{open ? '▾' : '▸'}</span>
                     <span className={styles.groupName}>{name}</span>
                     <span className={styles.arrayBadge} style={{ marginLeft: 6 }}>array</span>
                     {itemProps
                         ? <span className={styles.groupCount}>{Object.keys(itemProps).length} fields → entity</span>
-                        : <span className={styles.groupCount}>no resolvable item schema</span>}
+                        : scalarItemType
+                            ? <span className={styles.groupCount}>items: {scalarItemType}</span>
+                            : <span className={styles.groupCount}>no resolvable item schema</span>}
                     {isRequired && <span className={`${styles.requiredBadge} ${styles.groupRequiredBadge}`}>required</span>}
                 </td>
             </tr>
+            {open && scalarItemType && !itemProps && (
+                <tr className={`${styles.propRow} ${styles.propRowNested}`}>
+                    <td className={styles.propNameCell}>
+                        {Array.from({ length: depth + 1 }, (_, i) => <span key={i} className={styles.indent} />)}
+                        <span className={styles.propName}>(items)</span>
+                    </td>
+                    <td className={styles.tableCell}><span className={styles.typeBadge}>{scalarItemType}</span></td>
+                    <td className={styles.tableCell}><span className={styles.textFaint}>optional</span></td>
+                    <td className={styles.tableCell} />
+                </tr>
+            )}
             {open && itemProps && Object.entries(itemProps).map(([leafName, leafProp]) => (
                 <tr key={leafName} className={`${styles.propRow} ${styles.propRowNested}`}>
                     <td className={styles.propNameCell}>
-                        <span className={styles.indent} />
+                        {Array.from({ length: depth + 1 }, (_, i) => <span key={i} className={styles.indent} />)}
                         <span className={styles.propName}>{leafName}</span>
                     </td>
                     <td className={styles.tableCell}><TypeBadge prop={leafProp} /></td>
@@ -116,22 +176,38 @@ const ArraySection: React.FC<{ name: string; prop: AnyProperty; isRequired: bool
     );
 };
 
-// ─── Group section (collapsible) ──────────────────────────────────────────────
+// ─── Group section (collapsible, recursive) ───────────────────────────────────
 
-const GroupSection: React.FC<{ name: string; prop: AnyProperty; topRequired: string[] }> = ({ name, prop, topRequired }) => {
+const GroupSection: React.FC<{ name: string; prop: AnyProperty; topRequired: string[]; depth?: number; resolveRef: RefResolver }> = ({ name, prop, topRequired, depth = 0, resolveRef }) => {
     const [open, setOpen] = useState(true);
     const isRequired = topRequired.includes(name);
 
+    // Resolve $ref to an objecttype and render as a group
+    if (!prop.type && '$ref' in prop) {
+        const ref = (prop as Record<string, unknown>).$ref as string;
+        const resolved = resolveRef(ref);
+        if (resolved) {
+            const resolvedProp: AnyProperty = {
+                type: 'object',
+                properties: (resolved.schema.properties ?? {}) as Record<string, LeafProperty>,
+                required: resolved.schema.required,
+            };
+            return <GroupSection name={name} prop={resolvedProp} topRequired={topRequired} depth={depth} resolveRef={resolveRef} />;
+        }
+        return <LeafRow name={name} prop={prop} required={isRequired} depth={depth} />;
+    }
+
     if (isArrayProperty(prop)) {
-        return <ArraySection name={name} prop={prop} isRequired={isRequired} />;
+        return <ArraySection name={name} prop={prop} isRequired={isRequired} depth={depth} resolveRef={resolveRef} />;
     }
 
     if (!isGroupProperty(prop)) {
-        return <LeafRow name={name} prop={prop} required={isRequired} />;
+        return <LeafRow name={name} prop={prop} required={isRequired} depth={depth} />;
     }
 
-    const leafEntries = Object.entries(prop.properties ?? {});
+    const childEntries = Object.entries(prop.properties ?? {});
     const groupRequired = prop.required ?? [];
+    const indentSpans = Array.from({ length: depth }, (_, i) => <span key={i} className={styles.indent} />);
 
     return (
         <>
@@ -140,26 +216,22 @@ const GroupSection: React.FC<{ name: string; prop: AnyProperty; topRequired: str
                 onClick={() => setOpen(o => !o)}
             >
                 <td className={styles.propNameCell} colSpan={4}>
+                    {indentSpans}
                     <span className={styles.groupChevron}>{open ? '▾' : '▸'}</span>
                     <span className={styles.groupName}>{name}</span>
-                    <span className={styles.groupCount}>{leafEntries.length} fields</span>
+                    <span className={styles.groupCount}>{childEntries.length} fields</span>
                     {isRequired && <span className={`${styles.requiredBadge} ${styles.groupRequiredBadge}`}>required</span>}
                 </td>
             </tr>
-            {open && leafEntries.map(([leafName, leafProp]) => (
-                <tr key={leafName} className={`${styles.propRow} ${styles.propRowNested}`}>
-                    <td className={styles.propNameCell}>
-                        <span className={styles.indent} />
-                        <span className={styles.propName}>{leafName}</span>
-                    </td>
-                    <td className={styles.tableCell}><TypeBadge prop={leafProp} /></td>
-                    <td className={styles.tableCell}>
-                        {groupRequired.includes(leafName)
-                            ? <span className={styles.requiredBadge}>required</span>
-                            : <span className={styles.textFaint}>optional</span>}
-                    </td>
-                    <td className={styles.tableCell}><ConstraintPills prop={leafProp} /></td>
-                </tr>
+            {open && childEntries.map(([childName, childProp]) => (
+                <GroupSection
+                    key={childName}
+                    name={childName}
+                    prop={childProp}
+                    topRequired={groupRequired}
+                    depth={depth + 1}
+                    resolveRef={resolveRef}
+                />
             ))}
         </>
     );
@@ -196,7 +268,7 @@ function flattenObjectToColumns(
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
-const DetailPanel: React.FC<Props> = ({ context, connection, item, onClose, onImplement }) => {
+const DetailPanel: React.FC<Props> = ({ context, connection, item, allObjectTypes, onClose, onImplement }) => {
     const studioPro = getStudioProApi(context);
     const [isImplementing, setIsImplementing] = useState(false);
     const [activeTab, setActiveTab] = useState<'attributes' | 'objects'>('attributes');
@@ -209,6 +281,12 @@ const DetailPanel: React.FC<Props> = ({ context, connection, item, onClose, onIm
     const properties = schema.properties ?? {};
     const topRequired = schema.required ?? [];
     const entries = Object.entries(properties);
+
+    const resolveRef: RefResolver = (ref: string) => {
+        const name = extractRefName(ref);
+        if (!name) return null;
+        return allObjectTypes.find(t => t.elementId === name) ?? null;
+    };
 
     const totalLeafs = entries.reduce((acc, [, prop]) => {
         if (isGroupProperty(prop)) return acc + Object.keys(prop.properties ?? {}).length;
@@ -499,6 +577,7 @@ const DetailPanel: React.FC<Props> = ({ context, connection, item, onClose, onIm
                                     name={name}
                                     prop={prop}
                                     topRequired={topRequired}
+                                    resolveRef={resolveRef}
                                 />
                             ))}
                         </tbody>

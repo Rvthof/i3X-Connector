@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { IComponent, getStudioProApi } from "@mendix/extensions-api";
 import { Loader, List, DetailPanel } from "./components/_components";
 import { initStudioPro, implementObjectAsEntity, summarizeArtifactResult } from "./services/studioProService";
-import { ConnectionConfig, ObjectType } from "./types";
+import { ConnectionConfig, ObjectType, isObjectTypeArray } from "./types";
 import styles from "./index.module.css";
 import "./index.module.css";
 
@@ -114,6 +114,7 @@ export const component: IComponent = {
                             context={componentContext}
                             connection={connection}
                             item={selectedItem}
+                            allObjectTypes={isObjectTypeArray(apiData) ? apiData : []}
                             onClose={() => setSelectedItem(null)}
                             onImplement={handleImplement}
                         />
