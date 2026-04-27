@@ -1,4 +1,4 @@
-import type { DomainModels, Projects, StudioProApi } from '@mendix/extensions-api';
+import type { DataTypes, DomainModels, Mappings, Projects, StudioProApi } from '@mendix/extensions-api';
 import {
     isArrayProperty,
     isGroupProperty,
@@ -8,7 +8,7 @@ import {
     type LeafProperty,
     type ObjectType,
 } from '../types';
-import { getObjectsUrl, getObjectsValueUrl, getObjectsHistoryUrl } from './i3xUrl';
+import { getObjectsUrl, getObjectsValueUrl, getObjectsHistoryUrl, getObjectWriteUrl } from './i3xUrl';
 import { buildI3xRequestHeaders } from './auth';
 import {
     buildValueQueryHttpRequestBody,
@@ -742,6 +742,286 @@ export async function createHistoryMicroflow(
     });
     await sp.app.model.microflows.save(microflow);
     return { microflowName, microflowCreated: true };
+}
+
+// Extract the first data[].value object from the raw /objects/value response JSON,
+// giving us just the writable properties without quality/timestamp wrappers.
+function extractFirstValuePayload(raw: unknown): unknown {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    for (const container of Object.values(raw as Record<string, unknown>)) {
+        if (container !== null && typeof container === 'object' && !Array.isArray(container)) {
+            const dataArray = (container as Record<string, unknown>).data;
+            if (Array.isArray(dataArray) && dataArray.length > 0) {
+                const firstItem = dataArray[0];
+                if (firstItem !== null && typeof firstItem === 'object' && !Array.isArray(firstItem)) {
+                    const valuePayload = (firstItem as Record<string, unknown>).value;
+                    if (valuePayload !== null && typeof valuePayload === 'object' && !Array.isArray(valuePayload)) {
+                        return valuePayload;
+                    }
+                }
+            }
+        }
+    }
+    return {};
+}
+
+function stringifyJsonWithDecimalIntegers(value: unknown): string {
+    const decimalIntegerMarker = '__I3X_DECIMAL_INTEGER__';
+    const json = JSON.stringify(
+        value,
+        (_key, currentValue) => {
+            if (typeof currentValue === 'number' && Number.isFinite(currentValue) && Number.isInteger(currentValue)) {
+                return `${decimalIntegerMarker}${currentValue.toFixed(1)}`;
+            }
+
+            return currentValue;
+        },
+        2
+    );
+
+    return json.replace(
+        new RegExp(`"${decimalIntegerMarker}(-?(?:0|[1-9]\\d*)\\.0)"`, 'g'),
+        '$1'
+    );
+}
+
+function fixExportMappingElements(
+    elements: Mappings.ObjectMappingElement[],
+    parentEntityQualifiedName: string | null,
+    moduleName: string
+): void {
+    for (const el of elements) {
+        el.objectHandling = parentEntityQualifiedName === null ? 'Parameter' : 'Find';
+
+        if (parentEntityQualifiedName !== null && el.entity) {
+            const parentEntityName = parentEntityQualifiedName.split('.').pop() ?? '';
+            const childEntityName = el.entity.split('.').pop() ?? '';
+            el.association = `${moduleName}.${parentEntityName}_${childEntityName}`;
+        } else {
+            el.association = null;
+        }
+
+        fixExportMappingElements(
+            el.children.filter((c): c is Mappings.ObjectMappingElement => 'children' in c),
+            el.entity,
+            moduleName
+        );
+    }
+}
+
+// Build the selection paths and MapObject list for an export mapping from a parsed
+// JSON value object, deriving entity names from the same convention as the value-query flow.
+function buildExportMappingEntries(
+    value: unknown,
+    path: string,
+    entityName: string,
+    moduleName: string
+): { selectionPaths: string[]; mapObjects: { path: string; entityQualifiedName: string; valueMappings: Record<string, string> }[] } {
+    const selectionPaths: string[] = [path];
+    const mapObjects: { path: string; entityQualifiedName: string; valueMappings: Record<string, string> }[] = [];
+
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        return { selectionPaths, mapObjects };
+    }
+
+    const obj = value as Record<string, unknown>;
+    const valueMappings: Record<string, string> = {};
+
+    for (const [key, childValue] of Object.entries(obj)) {
+        selectionPaths.push(`${path}|${key}`);
+        if (childValue !== null && typeof childValue === 'object' && !Array.isArray(childValue)) {
+            const child = buildExportMappingEntries(
+                childValue,
+                `${path}|${key}`,
+                `${entityName}_${toModelName(key)}`,
+                moduleName
+            );
+            // Selection paths for child levels are added by the recursive call;
+            // avoid duplicating the nested object path we already pushed above.
+            selectionPaths.push(...child.selectionPaths.slice(1));
+            mapObjects.push(...child.mapObjects);
+        } else {
+            valueMappings[key] = toModelName(key);
+        }
+    }
+
+    mapObjects.unshift({ path, entityQualifiedName: `${moduleName}.${entityName}`, valueMappings });
+    return { selectionPaths, mapObjects };
+}
+
+async function createOrUpdateExportMapping(
+    sp: StudioProApi,
+    moduleId: string,
+    moduleName: string,
+    mappingName: string,
+    jsonStructureQualifiedName: string,
+    parsedWriteValue: unknown,
+    baseEntityName: string,
+    entityVariableName: string
+): Promise<{ created: boolean; mappingId: string }> {
+    const existingMappings = await sp.app.model.exportMappings.getUnitsInfo();
+    const existingInfo = existingMappings.find(
+        u => u.moduleName === moduleName && u.name === mappingName
+    );
+
+    const { selectionPaths, mapObjects } = buildExportMappingEntries(
+        parsedWriteValue, '(Object)', baseEntityName, moduleName
+    );
+
+    const mapping = existingInfo
+        ? (await sp.app.model.exportMappings.loadAll(u => u.$ID === existingInfo.$ID))[0] ?? null
+        : await sp.app.model.exportMappings.addExportMapping(moduleId, {
+            name: mappingName,
+            selectStructure: {
+                structureType: 'jsonStructure',
+                structureQualifiedName: jsonStructureQualifiedName,
+                selectElements: {
+                    selectionType: 'paths',
+                    selection: selectionPaths,
+                },
+            },
+        });
+
+    if (!mapping) {
+        throw new Error(`Export mapping '${mappingName}' could not be loaded.`);
+    }
+
+    mapping.parameterName = entityVariableName;
+    await sp.app.model.exportMappings.clearElementMapping(mapping.$ID);
+    await sp.app.model.exportMappings.setElementMapping(mapping.$ID, mapObjects);
+
+    const hydratedMapping = (await sp.app.model.exportMappings.loadAll(u => u.$ID === mapping.$ID))[0] ?? mapping;
+    hydratedMapping.parameterName = entityVariableName;
+    fixExportMappingElements(hydratedMapping.rootMappingElements, null, moduleName);
+    await sp.app.model.exportMappings.save(hydratedMapping);
+
+    return { created: !existingInfo, mappingId: mapping.$ID };
+}
+
+export async function checkValueQueryEntitiesExist(
+    objectType: ObjectType,
+    selectedObject: { displayName: string },
+    moduleName = 'i3X_Connector'
+): Promise<boolean> {
+    const sp = getStudioPro();
+    const domainModel = await sp.app.model.domainModels.getDomainModel(moduleName);
+    if (!domainModel) return false;
+    const entityName = toModelName(`${objectType.displayName}_${selectedObject.displayName}`);
+    return domainModel.getEntity(entityName) !== undefined;
+}
+
+export interface WriteMicroflowResult {
+    microflowName: string;
+    exportMappingName: string;
+    microflowCreated: boolean;
+    exportMappingCreated: boolean;
+}
+
+export async function createWriteMicroflow(
+    objectType: ObjectType,
+    selectedObject: { elementId: string; displayName: string },
+    connection: ConnectionConfig,
+    moduleName = 'i3X_Connector'
+): Promise<WriteMicroflowResult> {
+    const sp = getStudioPro();
+    const selectedElementId = selectedObject.elementId.trim();
+
+    if (!selectedElementId) {
+        throw new Error('Selected object has no valid elementId.');
+    }
+
+    const writeUrl = getObjectWriteUrl(connection.apiBaseUrl, selectedElementId);
+    if (!writeUrl) {
+        throw new Error(`Cannot build write URL from '${connection.apiBaseUrl}'.`);
+    }
+
+    const typeName = toModelName(objectType.displayName);
+    const objectName = toModelName(selectedObject.displayName);
+    const baseEntityName = toModelName(`${objectType.displayName}_${selectedObject.displayName}`);
+    const microflowName = `MF_${typeName}_${objectName}_Write`;
+    const exportMappingName = `EM_${typeName}_${objectName}`;
+
+    const module = await getRequiredProjectModule(sp, moduleName);
+
+    // Verify the base entity exists — the write microflow reuses entities created
+    // by the last-known-values flow and must never create its own.
+    const domainModel = await sp.app.model.domainModels.getDomainModel(moduleName);
+    if (!domainModel || !domainModel.getEntity(baseEntityName)) {
+        throw new Error(
+            `Entity '${baseEntityName}' not found in module '${moduleName}'. ` +
+            `Run "Create last-known-value query microflow" first.`
+        );
+    }
+
+    // Build a write-specific JSON structure from just the value properties of the
+    // first data point — no quality/timestamp wrappers, no outer container key.
+    const writeJsonStructureName = `JSON_Write_${baseEntityName}`;
+    const rawStructures = await sp.app.model.jsonStructures.getUnitsInfo();
+    const rawStructureInfo = rawStructures.find(
+        u => u.moduleName === moduleName && u.name === `JSON_${baseEntityName}`
+    );
+    let parsedWriteValue: unknown = {};
+    let writeSnippet = '{}';
+    if (rawStructureInfo) {
+        const loaded = await sp.app.model.jsonStructures.loadAll(u => u.$ID === rawStructureInfo.$ID);
+        if (loaded.length > 0 && loaded[0].jsonSnippet) {
+            try {
+                parsedWriteValue = extractFirstValuePayload(JSON.parse(loaded[0].jsonSnippet));
+                writeSnippet = stringifyJsonWithDecimalIntegers(parsedWriteValue);
+            } catch {
+                // keep defaults
+            }
+        }
+    }
+    await createOrUpdateJsonStructure(sp, module.$ID, moduleName, writeJsonStructureName, writeSnippet);
+
+    const exportMappingResult = await createOrUpdateExportMapping(
+        sp,
+        module.$ID,
+        moduleName,
+        exportMappingName,
+        `${moduleName}.${writeJsonStructureName}`,
+        parsedWriteValue,
+        baseEntityName,
+        'InputObject'
+    );
+
+    const existing = await sp.app.model.microflows.loadAll(
+        u => u.moduleName === moduleName && u.name === microflowName,
+        1
+    );
+    if (existing.length > 0) {
+        return { microflowName, exportMappingName, microflowCreated: false, exportMappingCreated: exportMappingResult.created };
+    }
+
+    const microflow = await sp.app.model.microflows.addMicroflow(module.$ID, { name: microflowName });
+
+    await microflow.objectCollection.addMicroflowParameterObject({ name: 'InputObject' });
+    const inputParam = microflow.objectCollection.getMicroflowParameterObject('InputObject');
+    if (inputParam) {
+        const objType = (await sp.app.model.microflows.createElement('DataTypes$ObjectType')) as DataTypes.ObjectType;
+        objType.entity = `${moduleName}.${baseEntityName}`;
+        inputParam.variableType = objType as typeof inputParam.variableType;
+        inputParam.size = { width: 30, height: 30 };
+        inputParam.relativeMiddlePoint = { x: 100, y: 0 };
+    }
+
+    await populateMicroflowWithRestCall(sp, microflow, {
+        url: writeUrl,
+        requestBody: '',
+        exportMapping: {
+            mappingQualifiedName: `${moduleName}.${exportMappingName}`,
+            entityVariableName: 'InputObject',
+        },
+        extraHeaders: [
+            { key: 'Accept', value: `'application/json'` },
+            { key: 'Content-Type', value: `'application/json'` },
+        ],
+        connection,
+    });
+    await sp.app.model.microflows.save(microflow);
+
+    return { microflowName, exportMappingName, microflowCreated: true, exportMappingCreated: exportMappingResult.created };
 }
 
 export async function implementObjectAsEntity(

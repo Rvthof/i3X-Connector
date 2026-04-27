@@ -9,6 +9,10 @@ export interface RestMicroflowOptions {
     extraHeaders?: Array<{ key: string; value: string }>;
     connection: ConnectionConfig;
     importMappingId?: string;
+    exportMapping?: {
+        mappingQualifiedName: string;
+        entityVariableName: string;
+    };
 }
 
 export function buildValueQueryHttpRequestBody(selectedElementId: string): string {
@@ -127,7 +131,7 @@ export async function populateMicroflowWithRestCall(
     microflow: Microflows.Microflow,
     options: RestMicroflowOptions
 ): Promise<void> {
-    const { url, requestBody, requestBodyArgs = [], extraHeaders = [], connection, importMappingId } = options;
+    const { url, requestBody, requestBodyArgs = [], extraHeaders = [], connection, importMappingId, exportMapping } = options;
 
     const actionActivity = (await sp.app.model.microflows.createElement(
         'Microflows$ActionActivity'
@@ -138,12 +142,6 @@ export async function populateMicroflowWithRestCall(
     const httpConfiguration = (await sp.app.model.microflows.createElement(
         'Microflows$HttpConfiguration'
     )) as Microflows.HttpConfiguration;
-    const requestHandler = (await sp.app.model.microflows.createElement(
-        'Microflows$CustomRequestHandling'
-    )) as Microflows.CustomRequestHandling;
-    const requestTemplate = (await sp.app.model.microflows.createElement(
-        'Microflows$StringTemplate'
-    )) as Microflows.StringTemplate;
     const locationTemplate = (await sp.app.model.microflows.createElement(
         'Microflows$StringTemplate'
     )) as Microflows.StringTemplate;
@@ -155,17 +153,73 @@ export async function populateMicroflowWithRestCall(
     )) as Microflows.ResultHandling;
     const stringType = await sp.app.model.microflows.createElement('DataTypes$StringType');
 
-    requestTemplate.text = requestBody;
-    for (const argExpr of requestBodyArgs) {
-        const templateArg = (await sp.app.model.microflows.createElement(
+    // ExportXmlAction ID is needed for sequence-flow wiring further down.
+    let exportActivityId: string | null = null;
+
+    if (exportMapping) {
+        // MappingRequestHandling can only be contained in ExportXmlAction, not RestCallAction.
+        // The correct pattern: ExportXmlAction serialises the entity to $SerializedJson,
+        // then RestCallAction reads $SerializedJson via CustomRequestHandling.
+        const exportActivity = (await sp.app.model.microflows.createElement(
+            'Microflows$ActionActivity'
+        )) as Microflows.ActionActivity;
+        const exportXmlAction = (await sp.app.model.microflows.createElement(
+            'Microflows$ExportXmlAction'
+        )) as Microflows.ExportXmlAction;
+        const exportResultHandling = (await sp.app.model.microflows.createElement(
+            'Microflows$MappingRequestHandling'
+        )) as Microflows.MappingRequestHandling;
+        const variableExport = (await sp.app.model.microflows.createElement(
+            'Microflows$VariableExport'
+        )) as Microflows.VariableExport;
+
+        exportResultHandling.mapping = exportMapping.mappingQualifiedName;
+        exportResultHandling.mappingArgumentVariableName = exportMapping.entityVariableName;
+        exportResultHandling.contentType = 'Json';
+        exportXmlAction.resultHandling = exportResultHandling;
+        variableExport.outputVariableName = 'SerializedJson';
+        exportXmlAction.outputMethod = variableExport;
+        exportXmlAction.isValidationRequired = false;
+        exportActivity.action = exportXmlAction;
+        exportActivity.size = { width: 120, height: 60 };
+        exportActivity.relativeMiddlePoint = { x: 200, y: 200 };
+        microflow.objectCollection.objects.push(exportActivity);
+        exportActivityId = exportActivity.$ID;
+
+        const requestHandler = (await sp.app.model.microflows.createElement(
+            'Microflows$CustomRequestHandling'
+        )) as Microflows.CustomRequestHandling;
+        const requestTemplate = (await sp.app.model.microflows.createElement(
+            'Microflows$StringTemplate'
+        )) as Microflows.StringTemplate;
+        requestTemplate.text = '{1}';
+        const serializedJsonArg = (await sp.app.model.microflows.createElement(
             'Microflows$TemplateArgument'
         )) as Microflows.TemplateArgument;
-        templateArg.expression = argExpr;
-        requestTemplate.arguments.push(templateArg);
+        serializedJsonArg.expression = '$SerializedJson';
+        requestTemplate.arguments.push(serializedJsonArg);
+        requestHandler.template = requestTemplate;
+        restCall.requestHandling = requestHandler;
+        restCall.requestHandlingType = 'Custom';
+    } else {
+        const requestHandler = (await sp.app.model.microflows.createElement(
+            'Microflows$CustomRequestHandling'
+        )) as Microflows.CustomRequestHandling;
+        const requestTemplate = (await sp.app.model.microflows.createElement(
+            'Microflows$StringTemplate'
+        )) as Microflows.StringTemplate;
+        requestTemplate.text = requestBody;
+        for (const argExpr of requestBodyArgs) {
+            const templateArg = (await sp.app.model.microflows.createElement(
+                'Microflows$TemplateArgument'
+            )) as Microflows.TemplateArgument;
+            templateArg.expression = argExpr;
+            requestTemplate.arguments.push(templateArg);
+        }
+        requestHandler.template = requestTemplate;
+        restCall.requestHandling = requestHandler;
+        restCall.requestHandlingType = 'Custom';
     }
-    requestHandler.template = requestTemplate;
-    restCall.requestHandling = requestHandler;
-    restCall.requestHandlingType = 'Custom';
 
     httpConfiguration.overrideLocation = true;
     locationTemplate.text = '{1}';
@@ -215,7 +269,12 @@ export async function populateMicroflowWithRestCall(
     const startEvent = microflow.objectCollection.objects[0];
     const endEvent = microflow.objectCollection.objects[1];
     endEvent.relativeMiddlePoint = { x: 900, y: 200 };
-    microflow.flows.push(await createSequenceFlow(sp, startEvent.$ID, actionActivity.$ID));
+    if (exportActivityId) {
+        microflow.flows.push(await createSequenceFlow(sp, startEvent.$ID, exportActivityId));
+        microflow.flows.push(await createSequenceFlow(sp, exportActivityId, actionActivity.$ID));
+    } else {
+        microflow.flows.push(await createSequenceFlow(sp, startEvent.$ID, actionActivity.$ID));
+    }
     microflow.flows.push(await createSequenceFlow(sp, actionActivity.$ID, exclusiveSplit.$ID));
 
     const successActivity = await createMessageActivity(

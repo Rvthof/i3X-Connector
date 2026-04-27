@@ -74,3 +74,7 @@ export function getObjectsValueUrl(apiBaseUrl: string): string | null {
 export function getObjectsHistoryUrl(apiBaseUrl: string): string | null {
     return buildFromBase(apiBaseUrl, '/objects/history')?.toString() ?? null;
 }
+
+export function getObjectWriteUrl(apiBaseUrl: string, elementId: string): string | null {
+    return buildFromBase(apiBaseUrl, `/objects/${encodeURIComponent(elementId)}/value`)?.toString() ?? null;
+}
