@@ -1543,14 +1543,14 @@ async function addMicroflowParameters(
 ): Promise<void> {
     const sp = getStudioPro();
     for (const [index, parameter] of parameters.entries()) {
+        const position = { x: 100 + index * 100, y: 0 };
         const parameterObject = await sp.app.model.microflows.createElement<Microflows.MicroflowParameterObject>(
             'Microflows$MicroflowParameterObject',
             parameter.entityQualifiedName
-                ? { name: parameter.name, type: 'Object', entity: parameter.entityQualifiedName }
-                : { name: parameter.name, type: parameter.type ?? 'String' }
+                ? { name: parameter.name, type: 'Object', entity: parameter.entityQualifiedName, ...position }
+                : { name: parameter.name, type: parameter.type ?? 'String', ...position }
         );
         parameterObject.size = { width: 30, height: 30 };
-        parameterObject.relativeMiddlePoint = { x: 100 + index * 100, y: 0 };
         microflow.objectCollection.objects.push(parameterObject);
     }
 }

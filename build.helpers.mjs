@@ -67,7 +67,7 @@ export const commonConfig = {
     treeShaking: true,
     logLevel: "info",
     assetNames: "assets/[ext]/[name]-[hash]",
-    external: ["@mendix/component-framework", "@mendix/model-access-sdk"],
+    external: ["@mendix/component-framework", "@mendix/model-access-sdk", "@mendix/model-access-registry"],
     loader: {
         ".png": "file",
         ".svg": "file",

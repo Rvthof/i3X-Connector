@@ -383,15 +383,16 @@ export async function populateMicroflowWithRestCall(
     const handlerEndEvent = await createMicroflowElement<Microflows.EndEvent>(
         sp,
         'Microflows$EndEvent',
-        returnMappedResult ? { returnValue: 'empty' } : {}
+        { x: 520, y: 80 }
     );
-    handlerEndEvent.relativeMiddlePoint = { x: 520, y: 80 };
+    if (returnMappedResult) handlerEndEvent.returnValue = 'empty';
     microflow.objectCollection.objects.push(handlerEndEvent);
 
     if (annotationText) {
         const annotation = await createMicroflowElement<Microflows.Annotation>(sp, 'Microflows$Annotation', {
             caption: annotationText,
-            relativeMiddlePoint: { x: 160, y: 120 },
+            x: 160,
+            y: 120,
             size: { width: 280, height: 80 },
         });
         microflow.objectCollection.objects.push(annotation);
@@ -444,7 +445,8 @@ export async function populateMicroflowWithRestCall(
 
         const cursorAnnotation = await createMicroflowElement<Microflows.Annotation>(sp, 'Microflows$Annotation', {
             caption: 'Validate and apply every returned batch before updating lastSequenceNumber. Only acknowledge data that was processed successfully.',
-            relativeMiddlePoint: { x: 1040, y: 80 },
+            x: 1040,
+            y: 80,
             size: { width: 320, height: 80 },
         });
         microflow.objectCollection.objects.push(cursorAnnotation);
@@ -464,14 +466,15 @@ export async function populateMicroflowWithRestCall(
     startEvent.relativeMiddlePoint = { x: 100, y: 200 };
     microflow.objectCollection.objects.push(startEvent);
 
+    const endEventPosition = { x: updateCursorActivityId ? 1360 : importActivityId ? 1100 : 900, y: 200 };
     const endEvent = await createMicroflowElement<Microflows.EndEvent>(
         sp,
         'Microflows$EndEvent',
-        returnMappedResult && importMappingOutput
-            ? { returnValue: `$${importMappingOutput.outputVariableName}` }
-            : {}
+        endEventPosition
     );
-    endEvent.relativeMiddlePoint = { x: updateCursorActivityId ? 1360 : importActivityId ? 1100 : 900, y: 200 };
+    if (returnMappedResult && importMappingOutput) {
+        endEvent.returnValue = `$${importMappingOutput.outputVariableName}`;
+    }
     microflow.objectCollection.objects.push(endEvent);
 
     if (returnMappedResult && importMappingOutput) {
@@ -539,9 +542,9 @@ export async function populateMicroflowWithRestCall(
     const errorEndEvent = await createMicroflowElement<Microflows.EndEvent>(
         sp,
         'Microflows$EndEvent',
-        returnMappedResult ? { returnValue: 'empty' } : {}
+        { x: errorX + 100, y: 300 }
     );
-    errorEndEvent.relativeMiddlePoint = { x: errorX + 100, y: 300 };
+    if (returnMappedResult) errorEndEvent.returnValue = 'empty';
     microflow.objectCollection.objects.push(errorEndEvent);
     microflow.flows.push(await createSequenceFlow(sp, errorActivity.$ID, errorEndEvent.$ID));
 }
